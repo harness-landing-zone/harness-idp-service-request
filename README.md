@@ -150,11 +150,6 @@ Ways to run the pipeline without IDP: plan only, apply only (reconcile what Git 
 
 A Harness IDP 2.0 Workflow. It lists real objects from the chosen project (environments, connectors and, for Cloud Run, the GCP projects the connector can see) and triggers the pipeline.
 
-Two things learned the hard way, both noted in the file:
-
-- A dropdown inside a list row can depend on top-level fields only. That is why the deployment connector is chosen once, above the environment rows.
-- The two service type branches must not share a field name. When both branches defined `environments`, the dropdown settings of one branch silently replaced the other's.
-
 ## Prerequisites
 
 - A Harness account with **IDP**, **CD** and **IaCM**.
@@ -208,18 +203,6 @@ A full `tofu plan` then shows the Services and Infrastructure Definitions that w
 1. Create `tofu/modules/templates/<type>/service.tpl` and `infrastructure.tpl`. Copy an existing pair and change the Harness YAML; the header comment of each template lists the values it reads.
 2. Add the type to the `service_type` list in the form, with a branch for its fields. Give its list of environments its own field name.
 3. Extend the two `| dump` expressions in the form's trigger step so the new type's values are sent.
-
-No change is needed in the OpenTofu modules or in the pipeline.
-
-## Known limits and roadmap
-
-- **One-off request.** The form creates a Service. Requesting an existing identifier again overwrites its file with what the form can express, which is less than the file can hold. Changes after creation are made in Git for now.
-- **Adding an environment later** to an existing Service has no form yet.
-- **Connector scope.** The form's dropdowns list project-level connectors only. Shared connectors are typed with their `account.` or `org.` prefix.
-- **Infrastructure is not yet scoped** to its Service in Harness.
-- **Direct push to main.** The approval is the IaCM approval, not a pull request review.
-- **Environment overrides**, a choice of deployment pipeline template, an IDP catalog entry for the Service, remote state options and automated tests are planned.
-- Only Cloud Run has been run end to end. The Helm type renders and validates but has not been applied.
 
 ## Contributing
 
