@@ -1,0 +1,467 @@
+---
+template:
+  name: Configure Workspace Custom Template
+  type: Stage
+  spec:
+    type: Custom
+    spec:
+      execution:
+        steps:
+        - step:
+            type: Queue
+            name: Serialize Workspace Requests
+            identifier: Serialize_Workspace
+            timeout: 1d
+            spec:
+              key: "<+account.identifier>_<+org.identifier>_<+project.identifier>_<+stage.variables.workspace_identifier>"
+              scope: Stage
+        - stepGroup:
+            name: Preview Workspace
+            identifier: Preview_Workspace
+            steps:
+            - step:
+                type: GitClone
+                name: Clone Bootstrap Repository
+                identifier: Clone_Platform_Accelerator
+                timeout: 10m
+                spec:
+                  connectorRef: "<+stage.variables.bootstrap_repository_connector>"
+                  repoName: "<+stage.variables.bootstrap_repository>"
+                  cloneDirectory: "/harness/clone"
+                  build:
+                    type: branch
+                    spec:
+                      branch: "<+stage.variables.bootstrap_repository_branch>"
+            - step:
+                type: Run
+                name: Import and Plan Workspace
+                identifier: Plan_Workspace
+                timeout: 15m
+                spec:
+                  connectorRef: "<+stage.variables.image_connector>"
+                  image: "<+stage.variables.tofu_image>"
+                  shell: Sh
+                  command: |
+                    set -eu
+                    umask 077
+                    command -v git >/dev/null
+                    command -v jq >/dev/null
+                    case "$REQUIRE_APPROVAL" in true|false) ;; *) echo "Invalid REQUIRE_APPROVAL" >&2; exit 1 ;; esac
+                    case "$MODE" in preview|apply) ;; *) echo "Invalid MODE" >&2; exit 1 ;; esac
+                    BOOTSTRAP_COMMIT=$(git -c safe.directory="$BOOTSTRAP_DIR" -C "$BOOTSTRAP_DIR" rev-parse HEAD)
+                    if [ "$MODE" = "apply" ]; then
+                      if [ "$REQUIRE_APPROVAL" = "true" ]; then
+                        [ "$APPROVAL_STATUS" = "SUCCEEDED" ] || { echo "Approval is required" >&2; exit 1; }
+                      else
+                        echo "Development test: workspace user approval explicitly disabled"
+                      fi
+                      [ "$BOOTSTRAP_COMMIT" = "$EXPECTED_COMMIT" ] || { echo "Bootstrap commit changed" >&2; exit 1; }
+                    fi
+
+                    STATE_DIR=$(mktemp -d)
+                    # GitClone and Run may use different users. Keep all Tofu writes off the checkout,
+                    # including the dependency lockfile (which TF_DATA_DIR does not relocate).
+                    cp -R "$BOOTSTRAP_DIR/workspace-bootstrap/iacm-workspace" "$STATE_DIR/iacm-workspace"
+                    mkdir "$STATE_DIR/modules"
+                    cp -R "$BOOTSTRAP_DIR/workspace-bootstrap/modules/terraform-harness-iacm-workspace" "$STATE_DIR/modules/"
+                    chmod -R u+w "$STATE_DIR/iacm-workspace" "$STATE_DIR/modules"
+                    cd "$STATE_DIR/iacm-workspace"
+                    export TF_DATA_DIR="$STATE_DIR/.terraform"
+                    WS_STATE="$STATE_DIR/workspace.tfstate"
+                    tofu init -input=false -backend=false -no-color
+                    # Refresh reads remote objects and saves lookup outputs locally; it does not provision.
+                    tofu apply -refresh-only -input=false -auto-approve -no-color -state="$WS_STATE"
+                    WORKSPACE_ID=$(tofu output -state="$WS_STATE" -raw workspace_identifier)
+                    [ "$WORKSPACE_ID" = "$TF_VAR_workspace_identifier" ] || { echo "Workspace identity mismatch; push the updated bootstrap root before running" >&2; exit 1; }
+                    WORKSPACE_EXISTS=$(tofu output -state="$WS_STATE" -raw workspace_exists)
+                    WORKSPACE_IMPORT_ID=$(tofu output -state="$WS_STATE" -raw workspace_import_id)
+                    case "$WORKSPACE_EXISTS" in true|false) ;; *) exit 1 ;; esac
+                    if [ "$MODE" = "apply" ]; then
+                      [ "$WORKSPACE_EXISTS" = "$EXPECTED_EXISTS" ] || { echo "Workspace existence changed during approval; run a fresh preview" >&2; exit 1; }
+                    fi
+                    if [ "$WORKSPACE_EXISTS" = "true" ]; then
+                      tofu import -input=false -no-color -state="$WS_STATE" module.hpa_workspace.harness_platform_workspace.workspace "$WORKSPACE_IMPORT_ID"
+                    fi
+
+                    PLAN_EXIT=0
+                    tofu plan -input=false -no-color -state="$WS_STATE" -detailed-exitcode -out="$STATE_DIR/workspace.tfplan" > "$STATE_DIR/plan.log" 2>&1 || PLAN_EXIT=$?
+                    cat "$STATE_DIR/plan.log"
+                    case "$PLAN_EXIT" in
+                      0) HAS_CHANGES=false; PLAN_SUMMARY="No changes" ;;
+                      2) HAS_CHANGES=true; PLAN_SUMMARY=$(awk '/^Plan:/ {print; exit}' "$STATE_DIR/plan.log") ;;
+                      *) echo "Plan failed; no apply performed" >&2; exit 1 ;;
+                    esac
+                    tofu show -json "$STATE_DIR/workspace.tfplan" > "$STATE_DIR/plan.json"
+                    jq -e '[.resource_changes[]? | select(.mode == "managed") | .change.actions[] | select(. == "delete")] | length == 0' "$STATE_DIR/plan.json" >/dev/null || {
+                      echo "Workspace deletion/replacement is not allowed" >&2; exit 1;
+                    }
+                    WORKSPACE_ACTION=UPDATE
+                    if [ "$WORKSPACE_EXISTS" = "false" ]; then WORKSPACE_ACTION=CREATE; fi
+                    if [ "$HAS_CHANGES" = "false" ]; then WORKSPACE_ACTION=NO_CHANGE; fi
+                    if [ "$MODE" = "apply" ] && [ "$HAS_CHANGES" = "true" ]; then
+                      tofu apply -input=false -no-color -state="$WS_STATE" "$STATE_DIR/workspace.tfplan"
+                    fi
+                    export BOOTSTRAP_COMMIT WORKSPACE_ID WORKSPACE_EXISTS WORKSPACE_IMPORT_ID HAS_CHANGES PLAN_SUMMARY WORKSPACE_ACTION
+                    echo "Workspace: $WORKSPACE_ID; action: $WORKSPACE_ACTION; $PLAN_SUMMARY"
+                  envVariables:
+                    TF_IN_AUTOMATION: 'true'
+                    TF_INPUT: 'false'
+                    TF_LOG: 'OFF'
+                    HARNESS_PLATFORM_API_KEY: "<+secrets.getValue(<+stage.variables.workspace_api_key_secret_ref>)>"
+                    HARNESS_ACCOUNT_ID: "<+account.identifier>"
+                    HARNESS_ENDPOINT: "<+stage.variables.harness_platform_endpoint>"
+                    TF_VAR_account_id: "<+account.identifier>"
+                    TF_VAR_org_id: "<+org.identifier>"
+                    TF_VAR_project_id: "<+project.identifier>"
+                    TF_VAR_endpoint: "<+stage.variables.harness_platform_endpoint>"
+                    TF_VAR_cluster_identifier: "<+stage.variables.cluster_identifier>"
+                    MODE: preview
+                    TF_VAR_repository: "<+stage.variables.workspace_repository>"
+                    TF_VAR_repository_connector: "<+stage.variables.workspace_repository_connector>"
+                    TF_VAR_repository_path: "<+stage.variables.workspace_repository_path>"
+                    TF_VAR_repository_branch: "<+stage.variables.workspace_repository_branch>"
+                    TF_VAR_provisioner_version: "<+stage.variables.workspace_provisioner_version>"
+                    TF_VAR_workspace_secret_ref: "<+stage.variables.workspace_api_key_secret_ref>"
+                    TF_VAR_terraform_variables: "<+stage.variables.workspace_terraform_variables>"
+                    TF_VAR_environment_variables: "<+stage.variables.workspace_environment_variables>"
+                    BOOTSTRAP_DIR: "/harness/clone"
+                    TF_VAR_workspace_identifier: "<+stage.variables.workspace_identifier>"
+                    TF_VAR_terraform_variable_file: "<+stage.variables.workspace_terraform_variable_file>"
+                    REQUIRE_APPROVAL: "<+stage.variables.require_workspace_approval>"
+                    TF_VAR_repository_sha: "<+stage.variables.workspace_repository_sha>"
+                  outputVariables:
+                  - name: BOOTSTRAP_COMMIT
+                    type: String
+                    value: BOOTSTRAP_COMMIT
+                  - name: WORKSPACE_ID
+                    type: String
+                    value: WORKSPACE_ID
+                  - name: WORKSPACE_EXISTS
+                    type: String
+                    value: WORKSPACE_EXISTS
+                  - name: WORKSPACE_IMPORT_ID
+                    type: String
+                    value: WORKSPACE_IMPORT_ID
+                  - name: HAS_CHANGES
+                    type: String
+                    value: HAS_CHANGES
+                  - name: PLAN_SUMMARY
+                    type: String
+                    value: PLAN_SUMMARY
+                  - name: WORKSPACE_ACTION
+                    type: String
+                    value: WORKSPACE_ACTION
+            stepGroupInfra:
+              type: KubernetesDirect
+              spec:
+                connectorRef: "<+stage.variables.execution_cluster_connector>"
+                namespace: "<+stage.variables.execution_namespace>"
+        - step:
+            type: HarnessApproval
+            name: Approve Workspace Changes
+            identifier: Approve_Workspace
+            timeout: 1d
+            spec:
+              approvalMessage: |-
+                Workspace: <+execution.steps.Preview_Workspace.steps.Plan_Workspace.output.outputVariables.WORKSPACE_ID>
+                Action: <+execution.steps.Preview_Workspace.steps.Plan_Workspace.output.outputVariables.WORKSPACE_ACTION>
+                <+execution.steps.Preview_Workspace.steps.Plan_Workspace.output.outputVariables.PLAN_SUMMARY>
+                Bootstrap commit: <+execution.steps.Preview_Workspace.steps.Plan_Workspace.output.outputVariables.BOOTSTRAP_COMMIT>
+
+                Review the complete Terraform diff in Preview Workspace / Import and Plan Workspace logs.
+                The module owns workspace configuration and variable lists; omitted existing variables/settings can be removed/reset.
+                Approval authorizes the requested configuration. Apply replans from the same bootstrap commit and inputs; external changes can affect the final plan.
+                This does not execute the workspace.
+              includePipelineExecutionHistory: true
+              approvers:
+                userGroups:
+                - "<+stage.variables.workspace_approver_group>"
+                minimumCount: 1
+                disallowPipelineExecutor: false
+              approverInputs: []
+              isAutoRejectEnabled: false
+            when:
+              stageStatus: Success
+              condition: <+execution.steps.Preview_Workspace.steps.Plan_Workspace.output.outputVariables.HAS_CHANGES>
+                == "true" && <+stage.variables.require_workspace_approval> == "true"
+        - stepGroup:
+            name: Apply Workspace
+            identifier: Apply_Workspace
+            steps:
+            - step:
+                type: GitClone
+                name: Clone Approved Bootstrap Commit
+                identifier: Clone_Approved_Commit
+                timeout: 10m
+                spec:
+                  connectorRef: "<+stage.variables.bootstrap_repository_connector>"
+                  repoName: "<+stage.variables.bootstrap_repository>"
+                  cloneDirectory: "/harness/clone"
+                  build:
+                    type: commitSha
+                    spec:
+                      commitSha: "<+execution.steps.Preview_Workspace.steps.Plan_Workspace.output.outputVariables.BOOTSTRAP_COMMIT>"
+            - step:
+                type: Run
+                name: Replan and Apply Workspace
+                identifier: Apply_Workspace
+                timeout: 15m
+                spec:
+                  connectorRef: "<+stage.variables.image_connector>"
+                  image: "<+stage.variables.tofu_image>"
+                  shell: Sh
+                  command: |
+                    set -eu
+                    umask 077
+                    command -v git >/dev/null
+                    command -v jq >/dev/null
+                    case "$REQUIRE_APPROVAL" in true|false) ;; *) echo "Invalid REQUIRE_APPROVAL" >&2; exit 1 ;; esac
+                    case "$MODE" in preview|apply) ;; *) echo "Invalid MODE" >&2; exit 1 ;; esac
+                    BOOTSTRAP_COMMIT=$(git -c safe.directory="$BOOTSTRAP_DIR" -C "$BOOTSTRAP_DIR" rev-parse HEAD)
+                    if [ "$MODE" = "apply" ]; then
+                      if [ "$REQUIRE_APPROVAL" = "true" ]; then
+                        [ "$APPROVAL_STATUS" = "SUCCEEDED" ] || { echo "Approval is required" >&2; exit 1; }
+                      else
+                        echo "Development test: workspace user approval explicitly disabled"
+                      fi
+                      [ "$BOOTSTRAP_COMMIT" = "$EXPECTED_COMMIT" ] || { echo "Bootstrap commit changed" >&2; exit 1; }
+                    fi
+
+                    STATE_DIR=$(mktemp -d)
+                    # GitClone and Run may use different users. Keep all Tofu writes off the checkout,
+                    # including the dependency lockfile (which TF_DATA_DIR does not relocate).
+                    cp -R "$BOOTSTRAP_DIR/workspace-bootstrap/iacm-workspace" "$STATE_DIR/iacm-workspace"
+                    mkdir "$STATE_DIR/modules"
+                    cp -R "$BOOTSTRAP_DIR/workspace-bootstrap/modules/terraform-harness-iacm-workspace" "$STATE_DIR/modules/"
+                    chmod -R u+w "$STATE_DIR/iacm-workspace" "$STATE_DIR/modules"
+                    cd "$STATE_DIR/iacm-workspace"
+                    export TF_DATA_DIR="$STATE_DIR/.terraform"
+                    WS_STATE="$STATE_DIR/workspace.tfstate"
+                    tofu init -input=false -backend=false -no-color
+                    # Refresh reads remote objects and saves lookup outputs locally; it does not provision.
+                    tofu apply -refresh-only -input=false -auto-approve -no-color -state="$WS_STATE"
+                    WORKSPACE_ID=$(tofu output -state="$WS_STATE" -raw workspace_identifier)
+                    [ "$WORKSPACE_ID" = "$TF_VAR_workspace_identifier" ] || { echo "Workspace identity mismatch; push the updated bootstrap root before running" >&2; exit 1; }
+                    WORKSPACE_EXISTS=$(tofu output -state="$WS_STATE" -raw workspace_exists)
+                    WORKSPACE_IMPORT_ID=$(tofu output -state="$WS_STATE" -raw workspace_import_id)
+                    case "$WORKSPACE_EXISTS" in true|false) ;; *) exit 1 ;; esac
+                    if [ "$MODE" = "apply" ]; then
+                      [ "$WORKSPACE_EXISTS" = "$EXPECTED_EXISTS" ] || { echo "Workspace existence changed during approval; run a fresh preview" >&2; exit 1; }
+                    fi
+                    if [ "$WORKSPACE_EXISTS" = "true" ]; then
+                      tofu import -input=false -no-color -state="$WS_STATE" module.hpa_workspace.harness_platform_workspace.workspace "$WORKSPACE_IMPORT_ID"
+                    fi
+
+                    PLAN_EXIT=0
+                    tofu plan -input=false -no-color -state="$WS_STATE" -detailed-exitcode -out="$STATE_DIR/workspace.tfplan" > "$STATE_DIR/plan.log" 2>&1 || PLAN_EXIT=$?
+                    cat "$STATE_DIR/plan.log"
+                    case "$PLAN_EXIT" in
+                      0) HAS_CHANGES=false; PLAN_SUMMARY="No changes" ;;
+                      2) HAS_CHANGES=true; PLAN_SUMMARY=$(awk '/^Plan:/ {print; exit}' "$STATE_DIR/plan.log") ;;
+                      *) echo "Plan failed; no apply performed" >&2; exit 1 ;;
+                    esac
+                    tofu show -json "$STATE_DIR/workspace.tfplan" > "$STATE_DIR/plan.json"
+                    jq -e '[.resource_changes[]? | select(.mode == "managed") | .change.actions[] | select(. == "delete")] | length == 0' "$STATE_DIR/plan.json" >/dev/null || {
+                      echo "Workspace deletion/replacement is not allowed" >&2; exit 1;
+                    }
+                    WORKSPACE_ACTION=UPDATE
+                    if [ "$WORKSPACE_EXISTS" = "false" ]; then WORKSPACE_ACTION=CREATE; fi
+                    if [ "$HAS_CHANGES" = "false" ]; then WORKSPACE_ACTION=NO_CHANGE; fi
+                    if [ "$MODE" = "apply" ] && [ "$HAS_CHANGES" = "true" ]; then
+                      tofu apply -input=false -no-color -state="$WS_STATE" "$STATE_DIR/workspace.tfplan"
+                    fi
+                    export BOOTSTRAP_COMMIT WORKSPACE_ID WORKSPACE_EXISTS WORKSPACE_IMPORT_ID HAS_CHANGES PLAN_SUMMARY WORKSPACE_ACTION
+                    echo "Workspace: $WORKSPACE_ID; action: $WORKSPACE_ACTION; $PLAN_SUMMARY"
+                  envVariables:
+                    TF_IN_AUTOMATION: 'true'
+                    TF_INPUT: 'false'
+                    TF_LOG: 'OFF'
+                    HARNESS_PLATFORM_API_KEY: "<+secrets.getValue(<+stage.variables.workspace_api_key_secret_ref>)>"
+                    HARNESS_ACCOUNT_ID: "<+account.identifier>"
+                    HARNESS_ENDPOINT: "<+stage.variables.harness_platform_endpoint>"
+                    TF_VAR_account_id: "<+account.identifier>"
+                    TF_VAR_org_id: "<+org.identifier>"
+                    TF_VAR_project_id: "<+project.identifier>"
+                    TF_VAR_endpoint: "<+stage.variables.harness_platform_endpoint>"
+                    TF_VAR_cluster_identifier: "<+stage.variables.cluster_identifier>"
+                    MODE: apply
+                    TF_VAR_repository: "<+stage.variables.workspace_repository>"
+                    TF_VAR_repository_connector: "<+stage.variables.workspace_repository_connector>"
+                    TF_VAR_repository_path: "<+stage.variables.workspace_repository_path>"
+                    TF_VAR_repository_branch: "<+stage.variables.workspace_repository_branch>"
+                    TF_VAR_provisioner_version: "<+stage.variables.workspace_provisioner_version>"
+                    TF_VAR_workspace_secret_ref: "<+stage.variables.workspace_api_key_secret_ref>"
+                    TF_VAR_terraform_variables: "<+stage.variables.workspace_terraform_variables>"
+                    TF_VAR_environment_variables: "<+stage.variables.workspace_environment_variables>"
+                    EXPECTED_COMMIT: "<+execution.steps.Preview_Workspace.steps.Plan_Workspace.output.outputVariables.BOOTSTRAP_COMMIT>"
+                    EXPECTED_EXISTS: "<+execution.steps.Preview_Workspace.steps.Plan_Workspace.output.outputVariables.WORKSPACE_EXISTS>"
+                    APPROVAL_STATUS: "<+execution.steps.Approve_Workspace.status>"
+                    BOOTSTRAP_DIR: "/harness/clone"
+                    TF_VAR_workspace_identifier: "<+stage.variables.workspace_identifier>"
+                    TF_VAR_terraform_variable_file: "<+stage.variables.workspace_terraform_variable_file>"
+                    REQUIRE_APPROVAL: "<+stage.variables.require_workspace_approval>"
+                    TF_VAR_repository_sha: "<+stage.variables.workspace_repository_sha>"
+                  outputVariables:
+                  - name: BOOTSTRAP_COMMIT
+                    type: String
+                    value: BOOTSTRAP_COMMIT
+                  - name: WORKSPACE_ID
+                    type: String
+                    value: WORKSPACE_ID
+                  - name: WORKSPACE_EXISTS
+                    type: String
+                    value: WORKSPACE_EXISTS
+                  - name: WORKSPACE_IMPORT_ID
+                    type: String
+                    value: WORKSPACE_IMPORT_ID
+                  - name: HAS_CHANGES
+                    type: String
+                    value: HAS_CHANGES
+                  - name: PLAN_SUMMARY
+                    type: String
+                    value: PLAN_SUMMARY
+                  - name: WORKSPACE_ACTION
+                    type: String
+                    value: WORKSPACE_ACTION
+            stepGroupInfra:
+              type: KubernetesDirect
+              spec:
+                connectorRef: "<+stage.variables.execution_cluster_connector>"
+                namespace: "<+stage.variables.execution_namespace>"
+            when:
+              stageStatus: Success
+              condition: <+execution.steps.Preview_Workspace.steps.Plan_Workspace.output.outputVariables.HAS_CHANGES>
+                == "true"
+    failureStrategies:
+    - onFailure:
+        errors:
+        - AllErrors
+        action:
+          type: Abort
+    variables:
+    - name: cluster_identifier
+      type: String
+      description: Grouping tag on the workspace; workspace identity is supplied separately.
+      required: true
+      value: "<+input>"
+    - name: workspace_repository
+      type: String
+      description: Repository containing the OpenTofu root the workspace runs.
+      required: true
+      value: "<+input>.default(harness-idp-service-request)"
+    - name: workspace_repository_connector
+      type: String
+      description: Git connector for the workspace repository.
+      required: true
+      value: "<+input>.default(account.generic)"
+    - name: workspace_repository_path
+      type: String
+      description: Terraform root in the workspace repository. Request inputs
+        are configured separately.
+      required: true
+      value: "<+input>.default(tofu)"
+    - name: workspace_repository_branch
+      type: String
+      description: Branch the workspace will use.
+      required: true
+      value: "<+input>.default(main)"
+    - name: workspace_provisioner_version
+      type: String
+      description: OpenTofu version for the created workspace.
+      required: true
+      value: "<+input>.default(1.11.0)"
+    - name: workspace_api_key_secret_ref
+      type: String
+      description: Harness secret reference used for bootstrap and stored as a secret
+        reference in the workspace. Never supply a token directly.
+      required: true
+      value: "<+input>"
+    - name: harness_platform_endpoint
+      type: String
+      description: Harness API endpoint.
+      required: true
+      value: "<+input>.default(https://app.harness.io/gateway)"
+    - name: execution_cluster_connector
+      type: String
+      description: Kubernetes connector used to execute this bootstrap step; not necessarily
+        the cluster anything is deployed to.
+      required: true
+      value: "<+input>.default(hubcluster)"
+    - name: execution_namespace
+      type: String
+      description: Namespace for bootstrap execution.
+      required: true
+      value: "<+input>.default(default)"
+    - name: image_connector
+      type: String
+      description: Connector for the bootstrap container image.
+      required: true
+      value: "<+input>.default(account.DockerHub)"
+    - name: tofu_image
+      type: String
+      description: Image containing OpenTofu and a POSIX shell.
+      required: true
+      value: "<+input>.default(jfxs/opentofu-inventory:1.11)"
+    - name: bootstrap_repository
+      type: String
+      description: Repository containing the workspace bootstrap code.
+      required: true
+      value: "<+input>.default(harness-idp-service-request)"
+    - name: bootstrap_repository_connector
+      type: String
+      description: Git connector for the bootstrap repository, separate from the
+        workspace repository.
+      required: true
+      value: "<+input>.default(account.generic)"
+    - name: bootstrap_repository_branch
+      type: String
+      description: Bootstrap repository branch.
+      required: true
+      value: "<+input>.default(main)"
+    - name: workspace_terraform_variables
+      type: String
+      required: true
+      value: "<+input>.default([])"
+      description: 'Complete additional Terraform variable list: [{"key":"example","value":"value","value_type":"string"}].
+        Standard account ID is automatic. Omitted existing variables can be removed;
+        use secret references for secrets.'
+    - name: workspace_environment_variables
+      type: String
+      required: true
+      value: "<+input>.default([])"
+      description: Complete additional environment variable list. Standard Harness
+        credentials/account/endpoint are automatic. Omitted existing variables can
+        be removed. Never pass raw secrets.
+    - name: workspace_approver_group
+      type: String
+      required: true
+      value: "<+input>"
+      description: Harness user group approving workspace changes; group members may
+        self-approve for this test.
+    - name: workspace_identifier
+      type: String
+      required: true
+      value: "<+input>"
+      description: Stable workspace identifier; never change it to move
+        existing state.
+    - name: workspace_terraform_variable_file
+      type: String
+      required: true
+      value: "<+input>"
+      description: Repository-relative tfvars file in the workspace repository.
+    - name: require_workspace_approval
+      type: String
+      required: true
+      value: "<+input>.default(true).allowedValues(true,false)"
+      description: Keep true normally. False explicitly bypasses user approval for
+        development testing.
+    - name: workspace_repository_sha
+      type: String
+      description: Optional full commit SHA for workspace code and tfvars; overrides
+        the branch.
+      required: false
+      value: "<+input>.default()"
+  identifier: Configure_Workspace_Custom_Template
+  versionLabel: v4
+  description: Optional immutable workspace revision for code and tfvars. Approval
+    defaults to true; v3 unchanged.

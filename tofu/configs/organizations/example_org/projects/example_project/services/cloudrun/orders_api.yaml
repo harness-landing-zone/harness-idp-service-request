@@ -1,0 +1,43 @@
+# Service config file: name, description, tags
+# and the Harness Service under yaml.service. Rendered for Google Cloud Run.
+# Inputs: identifier, service, config (the type's own values from the request).
+# Values pass through jsonencode so odd characters cannot break the YAML.
+# A value left out of the config becomes <+input>, chosen when CD runs.
+service_type: cloudrun
+name: "orders-api"
+description: "Service requested through IDP"
+tags:
+  owner: "group:account/developers"
+  service_type: "cloudrun"
+yaml:
+  service:
+    name: "orders-api"
+    identifier: orders_api
+    serviceDefinition:
+      type: GoogleCloudRun
+      spec:
+        manifests:
+          - manifest:
+              identifier: cloud_run
+              type: GoogleCloudRunService
+              spec:
+                store:
+                  type: Github
+                  spec:
+                    connectorRef: "account.generic"
+                    repoName: "orders"
+                    gitFetchType: Commit
+                    commitId: <+input>
+                    paths:
+                      - "deploy/cloud-run/service.yaml"
+        artifacts:
+          primary:
+            primaryArtifactRef: container
+            sources:
+              - identifier: container
+                type: DockerRegistry
+                spec:
+                  connectorRef: <+input>
+                  imagePath: <+input>
+                  tag: <+input>
+    gitOpsEnabled: false

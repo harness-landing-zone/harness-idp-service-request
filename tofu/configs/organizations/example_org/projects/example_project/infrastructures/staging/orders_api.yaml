@@ -1,0 +1,22 @@
+# Infrastructure config for a Cloud Run Service in one environment: where it
+# deploys. One file per Service and environment.
+# Inputs: identifier, name, environment, infrastructure_type, config:
+#   connector_ref (required) GCP connector, with its scope prefix if not project level
+#   project       (required) GCP project id, not the project number
+#   region        (required) GCP region
+# Values pass through jsonencode so odd characters cannot break the YAML.
+infrastructure_type: cloudrun
+environment: staging
+name: "orders-api"
+yaml:
+  infrastructureDefinition:
+    name: "orders-api"
+    identifier: orders_api
+    environmentRef: staging
+    deploymentType: GoogleCloudRun
+    type: GoogleCloudRun
+    spec:
+      connectorRef: "gcpproject"
+      project: "my-gcp-project-staging"
+      region: "europe-west2"
+    allowSimultaneousDeployments: false

@@ -1,0 +1,380 @@
+---
+# Project Service Bootstrap
+#   1. Serialize        one run at a time per consumer project
+#   2. Publish Request  render the requested Service and its infrastructure files, push them to Git
+#   3. Configure Project Workspace   create or update the project's IaCM workspace
+#   4. Reconcile Project             make Harness match the files in Git: plan, approve, apply
+# The request exists only in stage 2. The workspace never sees it: it follows the
+# branch and reconciles whatever config files are there.
+pipeline:
+  name: Project Service Bootstrap
+  identifier: Project_Service_Bootstrap
+  projectIdentifier: platform_management
+  orgIdentifier: harness_platform_accelerator
+  description: Publish a requested Service and its infrastructure as config files in Git, create or update the project's service workspace, then plan and apply what Git records for that project. Apply requires manual approval.
+  tags:
+    purpose: service_request
+    status: poc
+  stages:
+    - stage:
+        name: Serialize Project Requests
+        identifier: Serialize_Requests
+        description: Requests for different projects run in parallel; requests for one project run one at a time.
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  type: Queue
+                  name: Serialize Project Requests
+                  identifier: Serialize_Requests
+                  timeout: 1d
+                  spec:
+                    key: service_request_<+pipeline.variables.organization_identifier>_<+pipeline.variables.project_identifier>
+                    scope: Pipeline
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: Abort
+    - stage:
+        name: Publish Request
+        identifier: Publish_Request
+        description: Renders the request with a throwaway state and pushes the new config files. Creates nothing in Harness.
+        type: IDP
+        spec:
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: GitClone
+                  name: Clone Config Repository
+                  identifier: Clone_Configs
+                  timeout: 10m
+                  spec:
+                    connectorRef: account.generic
+                    repoName: harness-idp-service-request
+                    cloneDirectory: /harness/clone
+                    build:
+                      type: branch
+                      spec:
+                        branch: main
+              - step:
+                  type: Run
+                  name: Render Request
+                  identifier: Render_Request
+                  timeout: 15m
+                  spec:
+                    connectorRef: account.DockerHub
+                    image: jfxs/opentofu-inventory:1.11
+                    shell: Sh
+                    command: |
+                      set -eu
+                      umask 022
+                      command -v jq >/dev/null
+                      command -v git >/dev/null
+                      # GitClone and Run may use different users; work on a writable copy.
+                      cp -R /harness/clone /harness/publish
+                      chmod -R u+w /harness/publish
+
+                      # BEGIN request translation: form values to the module's services map.
+                      # Unset optional runtime inputs may resolve to the literal string null.
+                      for name in SERVICE_DESCRIPTION SERVICE_CONFIG SERVICE_INFRASTRUCTURE; do
+                        eval "value=\${$name}"
+                        [ "$value" != "null" ] || eval "$name=''"
+                      done
+                      [ -n "$SERVICE_CONFIG" ] || SERVICE_CONFIG='{}'
+                      [ -n "$SERVICE_INFRASTRUCTURE" ] || SERVICE_INFRASTRUCTURE='{}'
+                      # The IDP form sends {"connector_ref": ..., "environments": [rows]},
+                      # with any other value chosen once beside them; input sets send the
+                      # map keyed by environment. Rows become that map: each row gets the
+                      # shared values, and its own values win. A row's cluster_connector
+                      # becomes connector_ref, and gcp_project and gcp_region become the
+                      # template keys project and region. A repeated environment fails here.
+                      SERVICE_INFRASTRUCTURE=$(printf '%s' "$SERVICE_INFRASTRUCTURE" | jq -c '
+                        if (.environments | type) == "array" then
+                          . as $form
+                          | [$form.environments[].environment] as $names
+                          | if ($names | length) != ($names | unique | length) then error("an environment is listed more than once") else . end
+                          | [$form.environments[] | {key: .environment, value: (($form | del(.environments)) + (if .cluster_connector then {connector_ref: .cluster_connector} else {} end) + (del(.environment, .cluster_connector) | with_entries(.key |= ltrimstr("gcp_"))))}]
+                          | from_entries
+                        else . end')
+                      TF_VAR_services=$(jq -cn --arg type "$SERVICE_TYPE" --arg id "$SERVICE_IDENTIFIER" --arg name "$SERVICE_NAME" --arg owner "$SERVICE_OWNER" --arg description "$SERVICE_DESCRIPTION" --argjson config "$SERVICE_CONFIG" --argjson infrastructure "$SERVICE_INFRASTRUCTURE" '{($type): {($id): ({name: $name, owner: $owner, config: $config} + (if $description == "" then {} else {description: $description} end) + (if ($infrastructure | length) == 0 then {} else {infrastructure: $infrastructure} end))}}')
+                      export TF_VAR_services
+                      # END request translation
+                      echo "Request: $TF_VAR_services"
+
+                      cd /harness/publish/tofu
+                      export TF_DATA_DIR=/harness/render/.terraform
+                      mkdir -p /harness/render
+                      # Only local files are written; the Harness provider is never called.
+                      export HARNESS_ACCOUNT_ID=render-only HARNESS_PLATFORM_API_KEY=render-only
+                      tofu init -input=false -no-color
+                      tofu apply -auto-approve -input=false -no-color -state=/harness/render/render.tfstate \
+                        -target=module.harness_services.local_file.rendered \
+                        -target=module.harness_infrastructures.local_file.rendered
+
+                      CHANGED=false
+                      if [ -n "$(git -c safe.directory=/harness/publish -C /harness/publish status --porcelain -- tofu/configs)" ]; then CHANGED=true; fi
+                      git -c safe.directory=/harness/publish -C /harness/publish status --short -- tofu/configs
+                      export CHANGED
+                    envVariables:
+                      TF_IN_AUTOMATION: "true"
+                      TF_INPUT: "false"
+                      TF_VAR_organization_identifier: <+pipeline.variables.organization_identifier>
+                      TF_VAR_project_identifier: <+pipeline.variables.project_identifier>
+                      TF_VAR_write_files: "true"
+                      SERVICE_TYPE: <+pipeline.variables.service_type>
+                      SERVICE_IDENTIFIER: <+pipeline.variables.service_identifier>
+                      SERVICE_NAME: <+pipeline.variables.service_name>
+                      SERVICE_OWNER: <+pipeline.variables.service_owner>
+                      SERVICE_DESCRIPTION: <+pipeline.variables.service_description>
+                      SERVICE_CONFIG: <+pipeline.variables.service_config>
+                      SERVICE_INFRASTRUCTURE: <+pipeline.variables.service_infrastructure>
+                    outputVariables:
+                      - name: CHANGED
+                        type: String
+                        value: CHANGED
+              - step:
+                  type: DirectPush
+                  name: Publish Config Files
+                  identifier: Push_Configs
+                  timeout: 10m
+                  spec:
+                    connectorType: Github
+                    connectorRef: account.generic
+                    organization: harness-landing-zone
+                    repository: harness-idp-service-request
+                    codeDirectory: /harness/publish
+                    branch: main
+                    forcePush: false
+                  when:
+                    stageStatus: Success
+                    condition: <+pipeline.stages.Publish_Request.spec.execution.steps.Render_Request.output.outputVariables.CHANGED> == "true"
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: Abort
+        when:
+          pipelineStatus: Success
+          condition: <+pipeline.variables.request_service> == "true"
+    - stage:
+        name: Configure Project Workspace
+        identifier: Configure_Workspace
+        description: Stateless workspace bootstrap. Preview, approve changes, replan and apply. Does not run the workspace.
+        template:
+          templateRef: account.Configure_Workspace_Custom_Template
+          versionLabel: v4
+          templateInputs:
+            type: Custom
+            variables:
+              # Only a tag on the workspace; the workspace identity is set below.
+              - name: cluster_identifier
+                type: String
+                value: project_services
+              - name: workspace_repository
+                type: String
+                value: harness-idp-service-request
+              - name: workspace_repository_connector
+                type: String
+                value: account.generic
+              - name: workspace_repository_path
+                type: String
+                value: tofu
+              # The workspace follows the branch, so a config file pushed to it
+              # is seen by the next run.
+              - name: workspace_repository_branch
+                type: String
+                value: main
+              - name: workspace_provisioner_version
+                type: String
+                value: 1.11.0
+              - name: workspace_api_key_secret_ref
+                type: String
+                value: harness_platform_accelerator_platform_deployer_token
+              - name: harness_platform_endpoint
+                type: String
+                value: https://app.harness.io/gateway
+              - name: execution_cluster_connector
+                type: String
+                value: my_k8s_runner
+              - name: execution_namespace
+                type: String
+                value: default
+              - name: image_connector
+                type: String
+                value: account.DockerHub
+              - name: tofu_image
+                type: String
+                value: jfxs/opentofu-inventory:1.11
+              - name: bootstrap_repository
+                type: String
+                value: harness-idp-service-request
+              - name: bootstrap_repository_connector
+                type: String
+                value: account.generic
+              - name: bootstrap_repository_branch
+                type: String
+                value: main
+              # Which consumer project this workspace serves.
+              - name: workspace_terraform_variables
+                type: String
+                value: '[{"key":"organization_identifier","value":"<+pipeline.variables.organization_identifier>","value_type":"string"},{"key":"project_identifier","value":"<+pipeline.variables.project_identifier>","value_type":"string"}]'
+              - name: workspace_environment_variables
+                type: String
+                value: "[]"
+              - name: workspace_approver_group
+                type: String
+                value: account.container_team
+              - name: workspace_identifier
+                type: String
+                value: project_service_bootstrap_<+pipeline.variables.organization_identifier>_<+pipeline.variables.project_identifier>
+              # Settings every workspace run shares, such as write_files = false.
+              - name: workspace_terraform_variable_file
+                type: String
+                value: tofu/workspace.tfvars
+              - name: require_workspace_approval
+                type: String
+                value: <+pipeline.variables.require_workspace_approval>
+              - name: workspace_repository_sha
+                type: String
+                value: ""
+        when:
+          pipelineStatus: Success
+          condition: <+pipeline.variables.tofu_action> != "request"
+    - stage:
+        name: Reconcile Project
+        identifier: Reconcile_Project
+        description: Init, plan, manual approval, apply. Creates the Services and Infrastructure Definitions recorded in Git for this project.
+        type: IACM
+        spec:
+          workspace: project_service_bootstrap_<+pipeline.variables.organization_identifier>_<+pipeline.variables.project_identifier>
+          execution:
+            steps:
+              - step:
+                  type: Queue
+                  name: Serialize Workspace Operations
+                  identifier: Serialize_Workspace
+                  timeout: 1d
+                  spec:
+                    key: <+account.identifier>_<+org.identifier>_<+project.identifier>_<+workspace.identifier>
+                    scope: Stage
+              - step:
+                  type: IACMOpenTofuPlugin
+                  name: Init
+                  identifier: init
+                  timeout: 10m
+                  spec:
+                    command: init
+              - step:
+                  type: IACMOpenTofuPlugin
+                  name: Plan
+                  identifier: plan
+                  timeout: 30m
+                  spec:
+                    command: plan
+              - step:
+                  type: IACMApproval
+                  name: Approve Plan
+                  identifier: Approve_Plan
+                  timeout: 1h
+                  spec:
+                    autoApprove: false
+                  when:
+                    stageStatus: Success
+                    condition: <+pipeline.variables.tofu_action> == "apply"
+              - step:
+                  type: IACMOpenTofuPlugin
+                  name: Apply
+                  identifier: apply
+                  timeout: 60m
+                  spec:
+                    command: apply
+                  when:
+                    stageStatus: Success
+                    condition: <+pipeline.variables.tofu_action> == "apply"
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: Abort
+        when:
+          pipelineStatus: Success
+          condition: <+pipeline.variables.tofu_action> == "plan" || <+pipeline.variables.tofu_action> == "apply"
+  variables:
+    - name: organization_identifier
+      type: String
+      required: true
+      value: <+input>
+      description: Organization of the consumer project, for example example_org.
+    - name: project_identifier
+      type: String
+      required: true
+      value: <+input>
+      description: Consumer project that owns the Services, for example example_project. It is also the folder under tofu/configs.
+    - name: tofu_action
+      type: String
+      required: true
+      value: <+input>.default(plan).allowedValues(request,workspace,plan,apply)
+      description: request only publishes the config files; workspace also creates or updates the workspace; plan also plans the project; apply waits for manual approval, then applies.
+    - name: require_workspace_approval
+      type: String
+      required: true
+      value: <+input>.default(true).allowedValues(true,false)
+      description: Keep true normally. False skips the approval on workspace changes for development testing.
+    - name: request_service
+      type: String
+      required: true
+      value: <+input>.default(false).allowedValues(true,false)
+      description: true when this run carries a Service request; the fields below are then used. false reconciles what Git already records.
+    - name: service_type
+      type: String
+      required: false
+      value: <+input>
+      description: Request only. A type folder under tofu/modules/templates, for example cloudrun or helm.
+    - name: service_identifier
+      type: String
+      required: false
+      value: <+input>
+      description: Request only. New stable Service identifier, for example orders_api.
+    - name: service_name
+      type: String
+      required: false
+      value: <+input>
+      description: Request only. Service display name, for example orders-api.
+    - name: service_owner
+      type: String
+      required: false
+      value: <+input>
+      description: Request only. Owning team reference, for example group:account/orders.
+    - name: service_description
+      type: String
+      required: false
+      value: <+input>
+      description: Request only. Optional description.
+    - name: service_config
+      type: String
+      required: false
+      value: <+input>
+      description: 'Request only. The values the type''s service template reads, as one JSON object, for example {"git":{"connector_ref":"account.generic","repository":"orders","path":"deploy/service.yaml"}}.'
+    - name: service_infrastructure
+      type: String
+      required: false
+      value: <+input>
+      description: 'Request only. Where the Service deploys, per environment, as one JSON object, for example {"dev":{"connector_ref":"gcpproject","project":"my-gcp-project","region":"europe-west2"}}.'
+  fixedInputsOnRerun: true

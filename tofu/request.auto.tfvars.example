@@ -1,0 +1,27 @@
+# Requests grouped by type. The group key is the type: it selects
+# templates/<type>/ and the folder services/<type>/ the file is written to.
+services = {
+  cloudrun = {
+    orders_api = {
+      name  = "orders-api"
+      owner = "group:account/orders"
+      config = {
+        git = {
+          connector_ref = "account.generic"
+          repository    = "orders"
+          path          = "deploy/service.yaml"
+        }
+        variables = { container_port = "8080" }
+      }
+
+      # Where this Service deploys, one entry per environment.
+      infrastructure = {
+        dev = {
+          connector_ref = "gcpproject"
+          project       = "my-gcp-project-dev"
+          region        = "europe-west2"
+        }
+      }
+    }
+  }
+}

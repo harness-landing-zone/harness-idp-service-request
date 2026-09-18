@@ -1,0 +1,52 @@
+---
+# Input set that sends exactly what the IDP form sends: the connector chosen
+# once and the environment rows as a list. It tests the pipeline's row-to-map
+# translation without IDP. Requests the Cloud Run Service payments_api with a
+# dev and a staging infrastructure in example_org/example_project, then applies
+# after manual approval.
+inputSet:
+  name: Example project request payments-api
+  identifier: example_project_request_payments_api
+  orgIdentifier: harness_platform_accelerator
+  projectIdentifier: platform_management
+  tags:
+    purpose: service_request
+  pipeline:
+    identifier: Project_Service_Bootstrap
+    variables:
+      - name: organization_identifier
+        type: String
+        value: example_org
+      - name: project_identifier
+        type: String
+        value: example_project
+      - name: tofu_action
+        type: String
+        value: apply
+      - name: require_workspace_approval
+        type: String
+        value: "true"
+      - name: request_service
+        type: String
+        value: "true"
+      - name: service_type
+        type: String
+        value: cloudrun
+      - name: service_identifier
+        type: String
+        value: payments_api
+      - name: service_name
+        type: String
+        value: payments-api
+      - name: service_owner
+        type: String
+        value: group:account/developers
+      - name: service_description
+        type: String
+        value: Payments API on Cloud Run
+      - name: service_config
+        type: String
+        value: '{"git":{"connector_ref":"account.generic","repository":"payments","path":"deploy/cloud-run/service.yaml"}}'
+      - name: service_infrastructure
+        type: String
+        value: '{"connector_ref":"gcpproject","environments":[{"environment":"dev","gcp_project":"my-gcp-project-dev","gcp_region":"europe-west2"},{"environment":"staging","gcp_project":"my-gcp-project-staging","gcp_region":"europe-west2"}]}'

@@ -1,0 +1,25 @@
+# OpenTofu / Terraform local files
+.terraform/
+.terraform.lock.hcl
+*.tfplan
+
+# State can contain secrets
+*.tfstate
+*.tfstate.*
+
+# Local inputs. OpenTofu loads *.auto.tfvars automatically, so a committed one
+# would become permanent input for every workspace run.
+*.tfvars
+*.tfvars.json
+# Attached to every IaCM workspace by the pipeline; holds no secrets.
+!tofu/workspace.tfvars
+
+# Local overrides and CLI configuration
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+.DS_Store

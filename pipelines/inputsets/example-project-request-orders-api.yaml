@@ -1,0 +1,50 @@
+---
+# Input set that stands in for the IDP form: requests the Cloud Run Service
+# orders_api with its dev infrastructure in example_org/example_project, then
+# applies after manual approval.
+inputSet:
+  name: Example project request orders-api
+  identifier: example_project_request_orders_api
+  orgIdentifier: harness_platform_accelerator
+  projectIdentifier: platform_management
+  tags:
+    purpose: service_request
+  pipeline:
+    identifier: Project_Service_Bootstrap
+    variables:
+      - name: organization_identifier
+        type: String
+        value: example_org
+      - name: project_identifier
+        type: String
+        value: example_project
+      - name: tofu_action
+        type: String
+        value: apply
+      - name: require_workspace_approval
+        type: String
+        value: "true"
+      - name: request_service
+        type: String
+        value: "true"
+      - name: service_type
+        type: String
+        value: cloudrun
+      - name: service_identifier
+        type: String
+        value: orders_api
+      - name: service_name
+        type: String
+        value: orders-api
+      - name: service_owner
+        type: String
+        value: group:account/orders
+      - name: service_description
+        type: String
+        value: Orders API on Cloud Run
+      - name: service_config
+        type: String
+        value: '{"git":{"connector_ref":"account.generic","repository":"orders","path":"deploy/service.yaml"},"variables":{"container_port":"8080"}}'
+      - name: service_infrastructure
+        type: String
+        value: '{"dev":{"connector_ref":"gcpproject","project":"my-gcp-project-dev","region":"europe-west2"}}'

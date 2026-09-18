@@ -1,0 +1,28 @@
+---
+# Input set for example_org/example_project: no request, plan only. Reconciles what
+# Git already records.
+inputSet:
+  name: Example project plan
+  identifier: example_project_plan
+  orgIdentifier: harness_platform_accelerator
+  projectIdentifier: platform_management
+  tags:
+    purpose: service_request
+  pipeline:
+    identifier: Project_Service_Bootstrap
+    variables:
+      - name: organization_identifier
+        type: String
+        value: example_org
+      - name: project_identifier
+        type: String
+        value: example_project
+      - name: tofu_action
+        type: String
+        value: plan
+      - name: require_workspace_approval
+        type: String
+        value: "true"
+      - name: request_service
+        type: String
+        value: "false"
