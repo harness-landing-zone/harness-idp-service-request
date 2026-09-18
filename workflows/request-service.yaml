@@ -1,7 +1,7 @@
 # Request a Service: a one-off request for a new Service and one infrastructure
-# per environment. It sends the request to the Project Service Bootstrap
-# pipeline, which publishes the config files to Git, then plans and applies them
-# after approval. Later changes are made by the platform team.
+# per environment. It triggers the Service Request pipeline in the
+# idp_orchestrator project, which opens a pull request with the config files,
+# waits for approval, merges it and reconciles the project. Later changes are made by the platform team.
 #
 # The connector pickers list project-level connectors only, so a bare
 # identifier is the correct reference.
@@ -14,11 +14,11 @@
 apiVersion: harness.io/v1
 kind: Workflow
 name: Request a Service
-identifier: request_service_new
+identifier: request_service
 type: service
 owner: group:account/platform_team
 metadata:
-  description: Create a Harness Service and the infrastructure it deploys to in each environment you list. Config files are published to Git, then applied after approval. Nothing is deployed to the cloud.
+  description: Create a Harness Service and the infrastructure it deploys to in each environment you list. Config files are proposed in a pull request, then applied after it is merged and approved. Nothing is deployed to the cloud.
   tags:
     - service-request
     - cloudrun
@@ -33,14 +33,17 @@ spec:
         url: https://app.harness.io/ng/account/YOUR_ACCOUNT_ID/all/orgs/${{ parameters.organization_identifier }}/projects/${{ parameters.project_identifier }}/services/${{ parameters.service_identifier }}
       - title: Environments
         url: https://app.harness.io/ng/account/YOUR_ACCOUNT_ID/all/orgs/${{ parameters.organization_identifier }}/projects/${{ parameters.project_identifier }}/environments
-      - title: Config files in Git
-        url: https://github.com/harness-landing-zone/harness-idp-service-request/tree/main/tofu/configs/organizations/${{ parameters.organization_identifier }}/projects/${{ parameters.project_identifier }}
+      - title: Open pull requests
+        url: https://github.com/harness-landing-zone/harness-idp-service-request/pulls
     text:
       - title: What happens next
         content: |
           The request for **${{ parameters.service_name }}** (`${{ parameters.service_type }}`) was sent.
-          The pipeline publishes the Service file and one infrastructure file per environment to Git, then waits
-          for approval before it creates them. This is a one-off request: later changes go through the platform team.
+          The pipeline opens a pull request with the Service file and one infrastructure file per environment,
+          then waits for a reviewer to approve it in Harness. Open the pipeline execution to find the pull request
+          link. After approval the pull request is merged and your project is reconciled; nothing is created in
+          Harness before that.
+          This is a one-off request: later changes go through the platform team.
   parameters:
     - title: Request a Service
       description: Pick your project and the service type. The fields below the type change with it and list what already exists in your project. Choose the deployment connector once, then add one row per environment. Release values such as the Git revision and the image tag are chosen when you deploy, not here.
@@ -381,13 +384,13 @@ spec:
       name: Request the Service
       action: trigger:harness-custom-pipeline
       input:
-        url: https://app.harness.io/ng/account/YOUR_ACCOUNT_ID/all/orgs/harness_platform_accelerator/projects/platform_management/pipelines/Project_Service_Bootstrap/pipeline-studio?storeType=INLINE
+        url: https://app.harness.io/ng/account/YOUR_ACCOUNT_ID/all/orgs/harness_platform_accelerator/projects/idp_orchestrator/pipelines/Service_Request/pipeline-studio?storeType=INLINE
         inputset:
+          pipeline.variables.request_action: request
+          pipeline.variables.tofu_action: apply
+          pipeline.variables.allow_update: "false"
           pipeline.variables.organization_identifier: ${{ parameters.organization_identifier }}
           pipeline.variables.project_identifier: ${{ parameters.project_identifier }}
-          pipeline.variables.tofu_action: apply
-          pipeline.variables.require_workspace_approval: "true"
-          pipeline.variables.request_service: "true"
           pipeline.variables.service_type: ${{ parameters.service_type }}
           pipeline.variables.service_identifier: ${{ parameters.service_identifier }}
           pipeline.variables.service_name: ${{ parameters.service_name }}

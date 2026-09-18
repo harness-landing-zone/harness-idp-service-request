@@ -1,0 +1,453 @@
+---
+# Service Request (idp_orchestrator)
+# One linear run per request:
+#   1. Serialize          one run at a time per requested Service
+#   2. Publish Request    render the Service and infrastructure files, push them to a
+#                         request branch, open a pull request. Creates nothing.
+#   3. Review Request     Harness approval. The run waits here, without using a build
+#                         machine, while the pull request is reviewed.
+#   4. Merge Request      after approval, merge the pull request (or accept that a
+#                         reviewer already merged it) and delete the request branch
+#   5. Reconcile Project  chains Project Service Reconcile in platform_management:
+#                         workspace, plan, approval, apply
+# No Git trigger is involved, so the config repository is only a value in this
+# pipeline. request_action = reconcile skips 2 to 4 and only reconciles a project.
+pipeline:
+  name: Service Request
+  identifier: Service_Request
+  projectIdentifier: idp_orchestrator
+  orgIdentifier: harness_platform_accelerator
+  description: Entry point for the IDP service request form. Renders the Service and its infrastructure as config files, opens a pull request, waits for approval, merges the pull request and then chains Project Service Reconcile in platform_management. With request_action reconcile it only reconciles a project.
+  tags:
+    purpose: service_request
+    role: orchestrator
+    status: poc
+  stages:
+    - stage:
+        name: Serialize Project Requests
+        identifier: Serialize_Requests
+        description: Requests for different Services run in parallel, also while one waits for approval. Two runs for the same Service run one at a time. The workspace itself is serialized in the reconcile pipeline.
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  type: Queue
+                  name: Serialize Project Requests
+                  identifier: Serialize_Requests
+                  timeout: 1d
+                  spec:
+                    key: service_request_<+pipeline.variables.organization_identifier>_<+pipeline.variables.project_identifier>_<+pipeline.variables.service_identifier>
+                    scope: Pipeline
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: Abort
+    - stage:
+        name: Publish Request
+        identifier: Publish_Request
+        description: Renders the request with a throwaway state, pushes the files to a request branch and opens a pull request. Creates nothing in Harness.
+        type: IDP
+        spec:
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: GitClone
+                  name: Clone Config Repository
+                  identifier: Clone_Configs
+                  timeout: 10m
+                  spec:
+                    connectorRef: account.generic
+                    repoName: harness-idp-service-request
+                    cloneDirectory: /harness/clone
+                    build:
+                      type: branch
+                      spec:
+                        branch: main
+              - step:
+                  type: Run
+                  name: Render Request
+                  identifier: Render_Request
+                  timeout: 15m
+                  spec:
+                    connectorRef: account.DockerHub
+                    image: jfxs/opentofu-inventory:1.11
+                    shell: Sh
+                    command: |
+                      set -eu
+                      umask 022
+                      command -v jq >/dev/null
+                      command -v git >/dev/null
+                      # GitClone and Run may use different users; work on a writable copy.
+                      cp -R /harness/clone /harness/publish
+                      chmod -R u+w /harness/publish
+
+                      # BEGIN request translation: form values to the module's services map.
+                      # Unset optional runtime inputs may resolve to the literal string null.
+                      for name in SERVICE_DESCRIPTION SERVICE_CONFIG SERVICE_INFRASTRUCTURE; do
+                        eval "value=\${$name}"
+                        [ "$value" != "null" ] || eval "$name=''"
+                      done
+                      [ -n "$SERVICE_CONFIG" ] || SERVICE_CONFIG='{}'
+                      [ -n "$SERVICE_INFRASTRUCTURE" ] || SERVICE_INFRASTRUCTURE='{}'
+                      # The IDP form sends {"connector_ref": ..., "environments": [rows]},
+                      # with any other value chosen once beside them; input sets send the
+                      # map keyed by environment. Rows become that map: each row gets the
+                      # shared values, and its own values win. A row's cluster_connector
+                      # becomes connector_ref, and gcp_project and gcp_region become the
+                      # template keys project and region. A repeated environment fails here.
+                      SERVICE_INFRASTRUCTURE=$(printf '%s' "$SERVICE_INFRASTRUCTURE" | jq -c '
+                        if (.environments | type) == "array" then
+                          . as $form
+                          | [$form.environments[].environment] as $names
+                          | if ($names | length) != ($names | unique | length) then error("an environment is listed more than once") else . end
+                          | [$form.environments[] | {key: .environment, value: (($form | del(.environments)) + (if .cluster_connector then {connector_ref: .cluster_connector} else {} end) + (del(.environment, .cluster_connector) | with_entries(.key |= ltrimstr("gcp_"))))}]
+                          | from_entries
+                        else . end')
+                      TF_VAR_services=$(jq -cn --arg type "$SERVICE_TYPE" --arg id "$SERVICE_IDENTIFIER" --arg name "$SERVICE_NAME" --arg owner "$SERVICE_OWNER" --arg description "$SERVICE_DESCRIPTION" --argjson config "$SERVICE_CONFIG" --argjson infrastructure "$SERVICE_INFRASTRUCTURE" '{($type): {($id): ({name: $name, owner: $owner, config: $config} + (if $description == "" then {} else {description: $description} end) + (if ($infrastructure | length) == 0 then {} else {infrastructure: $infrastructure} end))}}')
+                      export TF_VAR_services
+                      # END request translation
+                      echo "Request: $TF_VAR_services"
+
+                      # A request creates a Service; it must not replace one that already
+                      # exists, whatever its type. Later changes are made in Git, or by
+                      # running this pipeline by hand with allow_update = true.
+                      EXISTING=$(find "/harness/publish/tofu/configs/organizations/$TF_VAR_organization_identifier/projects/$TF_VAR_project_identifier/services" \
+                        -name "$SERVICE_IDENTIFIER.yaml" 2>/dev/null | head -1)
+                      if [ -n "$EXISTING" ] && [ "$ALLOW_UPDATE" != "true" ]; then
+                        echo "Service $SERVICE_IDENTIFIER already exists in $TF_VAR_organization_identifier/$TF_VAR_project_identifier: ${EXISTING#/harness/publish/}" >&2
+                        echo "Change it in Git, or request a different identifier." >&2
+                        exit 1
+                      fi
+
+                      cd /harness/publish/tofu
+                      export TF_DATA_DIR=/harness/render/.terraform
+                      mkdir -p /harness/render
+                      # Only local files are written; the Harness provider is never called.
+                      export HARNESS_ACCOUNT_ID=render-only HARNESS_PLATFORM_API_KEY=render-only
+                      tofu init -input=false -no-color
+                      tofu apply -auto-approve -input=false -no-color -state=/harness/render/render.tfstate \
+                        -target=module.harness_services.local_file.rendered \
+                        -target=module.harness_infrastructures.local_file.rendered
+
+                      CHANGED=false
+                      if [ -n "$(git -c safe.directory=/harness/publish -C /harness/publish status --porcelain -- tofu/configs)" ]; then CHANGED=true; fi
+                      git -c safe.directory=/harness/publish -C /harness/publish status --short -- tofu/configs
+                      export CHANGED
+                    envVariables:
+                      TF_IN_AUTOMATION: "true"
+                      TF_INPUT: "false"
+                      TF_VAR_organization_identifier: <+pipeline.variables.organization_identifier>
+                      TF_VAR_project_identifier: <+pipeline.variables.project_identifier>
+                      TF_VAR_write_files: "true"
+                      SERVICE_TYPE: <+pipeline.variables.service_type>
+                      SERVICE_IDENTIFIER: <+pipeline.variables.service_identifier>
+                      SERVICE_NAME: <+pipeline.variables.service_name>
+                      SERVICE_OWNER: <+pipeline.variables.service_owner>
+                      SERVICE_DESCRIPTION: <+pipeline.variables.service_description>
+                      SERVICE_CONFIG: <+pipeline.variables.service_config>
+                      SERVICE_INFRASTRUCTURE: <+pipeline.variables.service_infrastructure>
+                      ALLOW_UPDATE: <+pipeline.variables.allow_update>
+                    outputVariables:
+                      - name: CHANGED
+                        type: String
+                        value: CHANGED
+              - step:
+                  type: Run
+                  name: Open Pull Request
+                  identifier: Open_Pull_Request
+                  description: Pushes the rendered files to the request branch and opens a pull request, or updates the one already open for that branch.
+                  timeout: 10m
+                  spec:
+                    connectorRef: account.DockerHub
+                    image: alpine:3.20
+                    shell: Sh
+                    command: |
+                      set -eu
+                      umask 077
+                      apk add --no-cache curl jq openssl git >/dev/null
+                      # GitHub API calls from the build machine can time out; fail fast and retry.
+                      gh_api() { curl -fsS --connect-timeout 10 --max-time 40 --retry 5 --retry-delay 3 --retry-all-errors "$@"; }
+
+                      # Short-lived GitHub App installation token, from the same App
+                      # the Git connector uses. Nothing long-lived is stored.
+                      KEY_FILE=$(mktemp)
+                      printf '%s\n' "$GITHUB_APP_PRIVATE_KEY" > "$KEY_FILE"
+                      b64() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+                      NOW=$(date +%s)
+                      HEADER=$(printf '{"alg":"RS256","typ":"JWT"}' | b64)
+                      CLAIMS=$(printf '{"iat":%s,"exp":%s,"iss":"%s"}' "$((NOW - 60))" "$((NOW + 540))" "$GITHUB_APP_ID" | b64)
+                      SIGNATURE=$(printf '%s.%s' "$HEADER" "$CLAIMS" | openssl dgst -sha256 -sign "$KEY_FILE" -binary | b64)
+                      rm -f "$KEY_FILE"
+                      TOKEN=$(gh_api -X POST \
+                        -H "Authorization: Bearer $HEADER.$CLAIMS.$SIGNATURE" \
+                        -H "Accept: application/vnd.github+json" \
+                        "https://api.github.com/app/installations/$GITHUB_APP_INSTALLATION_ID/access_tokens" | jq -r .token)
+                      [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || { echo "Could not get a GitHub App token" >&2; exit 1; }
+
+                      # One branch per requested Service. A repeated request replaces
+                      # the branch, so the open pull request shows the latest request.
+                      cd /harness/publish
+                      git config --global --add safe.directory /harness/publish
+                      git config user.name "harness-idp-request"
+                      git config user.email "harness-idp-request@users.noreply.github.com"
+                      git checkout -q -B "$REQUEST_BRANCH"
+                      git add -- "$CONFIGS_PATH"
+                      git commit -q -m "Request $SERVICE_TYPE Service $SERVICE_IDENTIFIER in $ORGANIZATION/$PROJECT"
+                      git push -q --force "https://x-access-token:$TOKEN@github.com/$GITHUB_OWNER/$GITHUB_REPOSITORY.git" "$REQUEST_BRANCH"
+
+                      API="https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPOSITORY"
+                      AUTH="Authorization: Bearer $TOKEN"
+                      PR_URL=$(gh_api -H "$AUTH" -H "Accept: application/vnd.github+json" \
+                        "$API/pulls?state=open&head=$GITHUB_OWNER:$REQUEST_BRANCH" | jq -r '.[0].html_url // empty')
+                      if [ -z "$PR_URL" ]; then
+                        BODY=$(jq -n --arg title "Request $SERVICE_TYPE Service $SERVICE_IDENTIFIER in $ORGANIZATION/$PROJECT" \
+                          --arg head "$REQUEST_BRANCH" --arg base "$BASE_BRANCH" \
+                          --arg body "Requested through the IDP service request form by $REQUESTED_BY. Approving the request in Harness merges this pull request and reconciles $ORGANIZATION/$PROJECT." \
+                          '{title: $title, head: $head, base: $base, body: $body}')
+                        PR_URL=$(gh_api -X POST -H "$AUTH" -H "Accept: application/vnd.github+json" \
+                          "$API/pulls" -d "$BODY" | jq -r .html_url)
+                      fi
+                      PR_NUMBER=${PR_URL##*/}
+                      echo "Pull request: $PR_URL"
+                      export PR_URL PR_NUMBER
+                    envVariables:
+                      GITHUB_APP_ID: "YOUR_GITHUB_APP_ID"
+                      GITHUB_APP_INSTALLATION_ID: "YOUR_GITHUB_APP_INSTALLATION_ID"
+                      GITHUB_APP_PRIVATE_KEY: <+secrets.getValue("account.github_app_private_key")>
+                      GITHUB_OWNER: harness-landing-zone
+                      GITHUB_REPOSITORY: harness-idp-service-request
+                      BASE_BRANCH: main
+                      CONFIGS_PATH: tofu/configs
+                      REQUEST_BRANCH: request/<+pipeline.variables.organization_identifier>/<+pipeline.variables.project_identifier>/<+pipeline.variables.service_identifier>
+                      ORGANIZATION: <+pipeline.variables.organization_identifier>
+                      PROJECT: <+pipeline.variables.project_identifier>
+                      SERVICE_TYPE: <+pipeline.variables.service_type>
+                      SERVICE_IDENTIFIER: <+pipeline.variables.service_identifier>
+                      REQUESTED_BY: <+pipeline.triggeredBy.name>
+                    outputVariables:
+                      - name: PR_URL
+                        type: String
+                        value: PR_URL
+                      - name: PR_NUMBER
+                        type: String
+                        value: PR_NUMBER
+                  when:
+                    stageStatus: Success
+                    condition: <+pipeline.stages.Publish_Request.spec.execution.steps.Render_Request.output.outputVariables.CHANGED> == "true"
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: Abort
+        when:
+          pipelineStatus: Success
+          condition: <+pipeline.variables.request_action> == "request"
+    - stage:
+        name: Review Request
+        identifier: Review_Request
+        description: Waits for a reviewer. No build machine runs while it waits.
+        type: Approval
+        spec:
+          execution:
+            steps:
+              - step:
+                  type: HarnessApproval
+                  name: Review Pull Request
+                  identifier: Review_Pull_Request
+                  timeout: 7d
+                  spec:
+                    approvalMessage: |-
+                      Review the requested config files in the pull request, then approve here:
+                      <+pipeline.stages.Publish_Request.spec.execution.steps.Open_Pull_Request.output.outputVariables.PR_URL>
+                      Approving merges the pull request and starts the reconcile of <+pipeline.variables.organization_identifier>/<+pipeline.variables.project_identifier>. Rejecting leaves the pull request open for you to close.
+                    includePipelineExecutionHistory: false
+                    approvers:
+                      userGroups:
+                        - account.container_team
+                      minimumCount: 1
+                      disallowPipelineExecutor: false
+                    approverInputs: []
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: Abort
+        when:
+          pipelineStatus: Success
+          condition: <+pipeline.variables.request_action> == "request" && <+pipeline.stages.Publish_Request.spec.execution.steps.Render_Request.output.outputVariables.CHANGED> == "true"
+    - stage:
+        name: Merge Request
+        identifier: Merge_Request
+        description: Merges the approved pull request so main records the request, then deletes the request branch.
+        type: IDP
+        spec:
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: Run
+                  name: Merge Pull Request
+                  identifier: Merge_Pull_Request
+                  timeout: 10m
+                  spec:
+                    connectorRef: account.DockerHub
+                    image: alpine:3.20
+                    shell: Sh
+                    command: |
+                      set -eu
+                      umask 077
+                      apk add --no-cache curl jq openssl >/dev/null
+                      # GitHub API calls from the build machine can time out; fail fast and retry.
+                      gh_api() { curl -fsS --connect-timeout 10 --max-time 40 --retry 5 --retry-delay 3 --retry-all-errors "$@"; }
+
+                      # Short-lived GitHub App installation token, as in Open Pull Request.
+                      KEY_FILE=$(mktemp)
+                      printf '%s\n' "$GITHUB_APP_PRIVATE_KEY" > "$KEY_FILE"
+                      b64() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+                      NOW=$(date +%s)
+                      HEADER=$(printf '{"alg":"RS256","typ":"JWT"}' | b64)
+                      CLAIMS=$(printf '{"iat":%s,"exp":%s,"iss":"%s"}' "$((NOW - 60))" "$((NOW + 540))" "$GITHUB_APP_ID" | b64)
+                      SIGNATURE=$(printf '%s.%s' "$HEADER" "$CLAIMS" | openssl dgst -sha256 -sign "$KEY_FILE" -binary | b64)
+                      rm -f "$KEY_FILE"
+                      TOKEN=$(gh_api -X POST \
+                        -H "Authorization: Bearer $HEADER.$CLAIMS.$SIGNATURE" \
+                        -H "Accept: application/vnd.github+json" \
+                        "https://api.github.com/app/installations/$GITHUB_APP_INSTALLATION_ID/access_tokens" | jq -r .token)
+                      [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || { echo "Could not get a GitHub App token" >&2; exit 1; }
+
+                      API="https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPOSITORY"
+                      AUTH="Authorization: Bearer $TOKEN"
+                      PR=$(gh_api -H "$AUTH" -H "Accept: application/vnd.github+json" "$API/pulls/$PR_NUMBER")
+                      STATE=$(printf '%s' "$PR" | jq -r .state)
+                      MERGED=$(printf '%s' "$PR" | jq -r .merged)
+                      if [ "$MERGED" = "true" ]; then
+                        echo "Pull request $PR_NUMBER was already merged by a reviewer"
+                      elif [ "$STATE" = "open" ]; then
+                        gh_api -X PUT -H "$AUTH" -H "Accept: application/vnd.github+json" \
+                          "$API/pulls/$PR_NUMBER/merge" -d '{"merge_method":"squash"}' | jq -r .message
+                      else
+                        echo "Pull request $PR_NUMBER was closed without merging; nothing to reconcile" >&2
+                        exit 1
+                      fi
+                      # The branch is only a vehicle for the request; ignore a branch already gone.
+                      curl -sS -o /dev/null --connect-timeout 10 --max-time 40 -X DELETE -H "$AUTH" \
+                        "$API/git/refs/heads/$REQUEST_BRANCH" || true
+                    envVariables:
+                      GITHUB_APP_ID: "YOUR_GITHUB_APP_ID"
+                      GITHUB_APP_INSTALLATION_ID: "YOUR_GITHUB_APP_INSTALLATION_ID"
+                      GITHUB_APP_PRIVATE_KEY: <+secrets.getValue("account.github_app_private_key")>
+                      GITHUB_OWNER: harness-landing-zone
+                      GITHUB_REPOSITORY: harness-idp-service-request
+                      PR_NUMBER: <+pipeline.stages.Publish_Request.spec.execution.steps.Open_Pull_Request.output.outputVariables.PR_NUMBER>
+                      REQUEST_BRANCH: request/<+pipeline.variables.organization_identifier>/<+pipeline.variables.project_identifier>/<+pipeline.variables.service_identifier>
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: Abort
+        when:
+          pipelineStatus: Success
+          condition: <+pipeline.variables.request_action> == "request" && <+pipeline.stages.Publish_Request.spec.execution.steps.Render_Request.output.outputVariables.CHANGED> == "true"
+    - stage:
+        name: Reconcile Project
+        identifier: Reconcile_Project
+        description: Hands over to platform_management, which owns the workspace and creates the resources from the files on main.
+        type: Pipeline
+        spec:
+          org: harness_platform_accelerator
+          project: platform_management
+          pipeline: Project_Service_Reconcile
+          inputs:
+            identifier: Project_Service_Reconcile
+            variables:
+              - name: organization_identifier
+                type: String
+                value: <+pipeline.variables.organization_identifier>
+              - name: project_identifier
+                type: String
+                value: <+pipeline.variables.project_identifier>
+              - name: tofu_action
+                type: String
+                value: <+pipeline.variables.tofu_action>
+              - name: require_workspace_approval
+                type: String
+                value: "true"
+  variables:
+    - name: request_action
+      type: String
+      required: true
+      value: <+input>.default(request).allowedValues(request,reconcile)
+      description: request runs the whole flow (render, pull request, approval, merge, reconcile); reconcile skips to the last stage and only applies what main records for the project.
+    - name: tofu_action
+      type: String
+      required: true
+      value: <+input>.default(apply).allowedValues(plan,apply)
+      description: For the reconcile stage. plan shows the changes; apply waits for manual approval, then applies.
+    - name: allow_update
+      type: String
+      required: true
+      value: <+input>.default(false).allowedValues(true,false)
+      description: Keep false. The form never sends true, so a form request can only create a Service. True lets a hand-started run replace the files of a Service that already exists.
+    - name: organization_identifier
+      type: String
+      required: true
+      value: <+input>
+      description: Organization of the consumer project, for example example_org.
+    - name: project_identifier
+      type: String
+      required: true
+      value: <+input>
+      description: Consumer project that owns the Services, for example example_project. It is also the folder under tofu/configs.
+    - name: service_type
+      type: String
+      required: false
+      value: <+input>
+      description: A type folder under tofu/modules/templates, for example cloudrun or helm.
+    - name: service_identifier
+      type: String
+      required: false
+      value: <+input>
+      description: New stable Service identifier, for example orders_api.
+    - name: service_name
+      type: String
+      required: false
+      value: <+input>
+      description: Service display name, for example orders-api.
+    - name: service_owner
+      type: String
+      required: false
+      value: <+input>
+      description: Owning team reference, for example group:account/orders.
+    - name: service_description
+      type: String
+      required: false
+      value: <+input>
+      description: Optional description.
+    - name: service_config
+      type: String
+      required: false
+      value: <+input>
+      description: 'The values the type''s service template reads, as one JSON object, for example {"git":{"connector_ref":"account.generic","repository":"orders","path":"deploy/service.yaml"}}.'
+    - name: service_infrastructure
+      type: String
+      required: false
+      value: <+input>
+      description: 'Where the Service deploys, per environment, as one JSON object, for example {"dev":{"connector_ref":"gcpproject","project":"my-gcp-project","region":"europe-west2"}}.'
+  fixedInputsOnRerun: true
