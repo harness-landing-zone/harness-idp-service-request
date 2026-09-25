@@ -1,6 +1,5 @@
 # Harness IDP service request
 
-> **Status: work in progress.** This is a working proof of concept, shared early so others can try it, question it and help shape it. Names, file shapes and the pipeline will change. It is not an official Harness project.
 
 A self-service way for a developer to ask for a new **Harness CD Service**, and the **Infrastructure Definitions** it deploys to, from a form in the Harness Internal Developer Portal (IDP). The request becomes plain YAML files in a pull request. After a reviewer approves, the files are merged and OpenTofu makes Harness match them.
 
