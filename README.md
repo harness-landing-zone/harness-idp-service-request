@@ -155,22 +155,22 @@ There are two ways in. Both end in the same files and the same workspace, so the
 | Stage | What it does |
 | --- | --- |
 | **Serialize Project Requests** | A queue keyed by organization, project and Service. Different Services run in parallel, also while one waits for approval. |
-| **Publish Request** | Fails if the requested Service already exists in the project (unless the run was started by hand with `allow_update = true`). Clones this repository, builds the request JSON from the pipeline variables with `jq`, runs a targeted, file-only `tofu apply` with a throwaway state, pushes a request branch and opens a pull request. |
+| **Publish Request** | Turns each connector the form picked into a scoped reference and checks it in Harness (see [Connectors at any scope](#connectors-at-any-scope)). Fails if the requested Service already exists in the project (unless the run was started by hand with `allow_update = true`). Clones the config repository, builds the request JSON from the pipeline variables with `jq`, runs a targeted, file-only `tofu apply` with a throwaway state, pushes a request branch and opens a pull request. |
 | **Review Request** | A Harness approval whose message links to the pull request. Swap it for a Jira approval if that is where your reviews live. |
 | **Merge Request** | Merges the pull request, or accepts a merge a reviewer already made, and deletes the branch. Fails if the pull request was closed unmerged. |
 | **Reconcile Project** | Chains `Project Service Reconcile` in the platform project. |
 
 Run it with `request_action = reconcile` to skip straight to the last stage and only reconcile a project.
 
-`Project Service Reconcile` lives in the platform project, next to the IaCM workspaces. It carries no request: **Configure Project Workspace** uses the stage template to create or update the workspace `project_service_bootstrap_<org>_<project>`, pointing at `tofu/` on the main branch, and **Reconcile Project** runs IaCM init, plan, manual approval and apply. Harness does not allow a chained pipeline to chain another, so keep it a leaf.
+`Project Service Reconcile` lives in the platform project, next to the IaCM workspaces. It carries no request: **Configure Project Workspace** uses the stage template to create or update the workspace `project_service_bootstrap_<org>_<project>`, pointing at `service-request-new/` (this repository's `tofu/` folder) in the config repository on the main branch, and **Reconcile Project** runs IaCM init, plan, manual approval and apply. Harness does not allow a chained pipeline to chain another, so keep it a leaf.
 
 The pull request is opened with an installation token of a GitHub App, made inside the step from the App's private key (a Harness file secret) and thrown away afterwards. No personal token is stored.
 
 **The direct path: `project-service-bootstrap.yaml`**
 
-One pipeline in the platform project that takes the request as pipeline values, pushes the rendered files straight to main, then configures the workspace and applies. It is the quickest way to try the module, and the input sets in `pipelines/inputsets/` drive it: plan only, apply only, and two example requests (one sends the infrastructure as a map, the other in the exact shape the form produces).
+One pipeline in the platform project that takes the request as pipeline values, pushes the rendered files straight to main, then configures the workspace and applies. It is the quickest way to try the module, and the input sets in `pipelines/inputsets/` drive it: plan only, apply only, and two example requests (one sends the infrastructure as a map, the other as the form's list of environment rows). The direct path does not scope connectors, so its input sets give each connector as a ready `connector_ref`.
 
-The `service_*` pipeline variables are the contract with the form in both paths: `service_config` is the JSON the service template reads, and `service_infrastructure` is either a map keyed by environment or the form's shape, the connector once plus a list of environment rows, which the render step converts to that map.
+The `service_*` pipeline variables are the contract with the form in both paths: `service_config` is the JSON the service template reads, and `service_infrastructure` is either a map keyed by environment or the form's shape, a connector once and/or one per row plus a list of environment rows, which the render step converts to that map. The form sends each connector as `{"connector": {"identifier", "org", "project"}}`; Service Request replaces it with `connector_ref` and `connector_type` before rendering.
 
 ### Workspace stage template (`pipelines/templates/` and `workspace-bootstrap/`)
 
@@ -180,6 +180,16 @@ The `service_*` pipeline variables are the contract with the form in both paths:
 
 A Harness IDP 2.0 Workflow. It lists real objects from the chosen project (environments, connectors and, for Cloud Run, the GCP projects the connector can see) and triggers the Service Request pipeline.
 
+#### Connectors at any scope
+
+Every connector field is a dropdown, filled with the developer's own token, of the connectors of its type that the developer can view in the project, its organization and the account. There is no free-text connector field, and no connector at any particular scope is assumed. An empty list means the developer can view no connector of that type at any of the three scopes; the field's description says to ask the platform team or create one in the project.
+
+A connector's identifier carries no scope, so each dropdown copies the chosen row's organization and project into two read-only fields next to it. Service Request builds the reference from the three values: a project connector keeps its bare identifier, an org connector becomes `org.<id>`, an account connector becomes `account.<id>`. It then reads each reference back from Harness and stops with a clear message if the connector is missing or has the wrong type. If a connector arrives without its project (or without both organization and project), it also looks the identifier up in the narrower scopes and stops if it exists there too, because the form did not say which one was picked. A Harness answer other than "found" or "not found", such as a denied request or a network error, also stops the run. The Helm chart repository may be an HTTP or an OCI Helm connector; the type read back chooses the chart store.
+
+The scope copy only works for fields outside a list, because the values it writes are shared by the whole form. So Helm asks for an environment, a cluster and a namespace for each of Dev, Staging and Prod as separate fields, and Cloud Run keeps one GCP connector for all its environment rows. Cloud Run's GCP project dropdown sends the bare connector identifier, so with an org or account GCP connector it stays empty and the developer types the project ID.
+
+**Permissions.** The dropdowns show what a developer can **view** (`core_connector_view`). Deploying through a connector needs **Access** (`core_connector_access`) for whoever runs the deployment. Grant the two together, for example in one "connector consumer" role with View and Access bound to the same resource group, and never View alone; then what developers see is what they can use. Service Request reads connectors with the same API key IDP triggers it with (`account.idp_service_requests_token`), so that key's service account needs connector View in the consumer projects, their organizations and the account.
+
 ## Prerequisites
 
 - A Harness account with **IDP**, **CD** and **IaCM**.
@@ -188,7 +198,7 @@ A Harness IDP 2.0 Workflow. It lists real objects from the chosen project (envir
 - A GitHub App installed on your copy of this repository with read and write access to contents and pull requests, and its private key stored as a Harness file secret. The same App can back your Git connector.
 - A Git connector that can read and push to your copy of this repository.
 - A Kubernetes connector for the step that runs the workspace bootstrap, and a container registry connector for the OpenTofu image.
-- A Harness API token, stored as a Harness secret, that can manage Services, Infrastructure Definitions and IaCM workspaces. A second secret holds the token IDP uses to trigger the pipeline.
+- A Harness API token, stored as a Harness secret, that can manage Services, Infrastructure Definitions and IaCM workspaces. A second secret, at account scope, holds the token IDP uses to trigger the pipeline; Service Request also uses it to read connectors.
 - Locally, only for testing: [OpenTofu](https://opentofu.org) 1.9 or newer.
 
 ## Values you must replace
@@ -198,18 +208,20 @@ The YAML files carry example values. Search and replace these before importing a
 | Value in the files | What it is |
 | --- | --- |
 | `YOUR_ACCOUNT_ID` | Your Harness account id (in the workflow's URLs) |
-| `harness_platform_accelerator` / `idp_orchestrator` | Organization and project that hold `Service Request` |
+| `harness_platform_accelerator` / `IDP_Orchistrator` | Organization and project that hold `Service Request` |
 | `harness_platform_accelerator` / `platform_management` | Organization and project that hold the reconcile and bootstrap pipelines and the IaCM workspaces |
-| `harness-landing-zone` / `harness-idp-service-request` | GitHub organization and repository name of your copy |
+| `harness-landing-zone` / `harness-idp-examples` | GitHub organization and the config repository the pipelines clone, push to and open pull requests in |
+| `service-request-new` | Folder in the config repository that holds this repository's `tofu/` folder; the pipelines and the workspace use it |
 | `account.generic` | Git connector used to clone and push |
-| `YOUR_GITHUB_APP_ID` / `YOUR_GITHUB_APP_INSTALLATION_ID` | The GitHub App that opens and merges pull requests |
-| `account.github_app_private_key` | File secret holding that App's private key |
+| `2780955` / `107783082` | ID and installation ID of the GitHub App that opens and merges pull requests |
+| `account.common-repos` | File secret holding that App's private key |
 | `account.DockerHub` | Container registry connector |
-| `my_k8s_runner` | Kubernetes connector that runs the workspace bootstrap step |
+| `ekshubsda` | Kubernetes connector that runs the workspace bootstrap step |
+| `https://app.harness.io/gateway` | Harness API endpoint Service Request reads connectors from |
 | `harness_platform_accelerator_platform_deployer_token` | Secret holding the Harness API token |
-| `idp_workflow_runner_token` | Secret IDP uses to trigger the pipeline |
+| `idp_service_requests_token` | Account-scope secret IDP uses to trigger the pipeline; Service Request reads connectors with it |
 | `account.container_team` | User group that approves requests and workspace changes |
-| `example_org` / `example_project`, `gcpproject`, `my-gcp-project-*` | Example consumer project, GCP connector and GCP project ids in the input sets and example config files |
+| `example_org` / `example_project`, `bau_payments` / `GCP_Project`, `gcpproject`, `my-gcp-project-*` | Example consumer projects, GCP connector and GCP project ids in the input sets, pipeline descriptions and example config files |
 
 ## Getting started
 
@@ -232,7 +244,7 @@ A full `tofu plan` then shows the Services and Infrastructure Definitions that w
 
 **4. Add the reviewed path.** Create `pipelines/project-service-reconcile.yaml` in the platform project, then `pipelines/service-request.yaml` in the orchestrator project.
 
-**5. Register the workflow** `workflows/request-service.yaml` in IDP and submit a request. The secret it names must hold a token that may execute pipelines in the orchestrator project.
+**5. Register the workflow** `workflows/request-service.yaml` in IDP and submit a request. The secret it names must hold a token that may execute pipelines in the orchestrator project and view connectors in the consumer projects, their organizations and the account.
 
 ## Adding a service type
 

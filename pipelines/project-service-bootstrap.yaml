@@ -59,7 +59,7 @@ pipeline:
                   timeout: 10m
                   spec:
                     connectorRef: account.generic
-                    repoName: harness-idp-service-request
+                    repoName: harness-idp-examples
                     cloneDirectory: /harness/clone
                     build:
                       type: branch
@@ -110,7 +110,7 @@ pipeline:
                       # END request translation
                       echo "Request: $TF_VAR_services"
 
-                      cd /harness/publish/tofu
+                      cd /harness/publish/service-request-new
                       export TF_DATA_DIR=/harness/render/.terraform
                       mkdir -p /harness/render
                       # Only local files are written; the Harness provider is never called.
@@ -121,8 +121,8 @@ pipeline:
                         -target=module.harness_infrastructures.local_file.rendered
 
                       CHANGED=false
-                      if [ -n "$(git -c safe.directory=/harness/publish -C /harness/publish status --porcelain -- tofu/configs)" ]; then CHANGED=true; fi
-                      git -c safe.directory=/harness/publish -C /harness/publish status --short -- tofu/configs
+                      if [ -n "$(git -c safe.directory=/harness/publish -C /harness/publish status --porcelain -- service-request-new/configs)" ]; then CHANGED=true; fi
+                      git -c safe.directory=/harness/publish -C /harness/publish status --short -- service-request-new/configs
                       export CHANGED
                     envVariables:
                       TF_IN_AUTOMATION: "true"
@@ -150,7 +150,7 @@ pipeline:
                     connectorType: Github
                     connectorRef: account.generic
                     organization: harness-landing-zone
-                    repository: harness-idp-service-request
+                    repository: harness-idp-examples
                     codeDirectory: /harness/publish
                     branch: main
                     forcePush: false
@@ -182,13 +182,13 @@ pipeline:
                 value: project_services
               - name: workspace_repository
                 type: String
-                value: harness-idp-service-request
+                value: harness-idp-examples
               - name: workspace_repository_connector
                 type: String
                 value: account.generic
               - name: workspace_repository_path
                 type: String
-                value: tofu
+                value: service-request-new
               # The workspace follows the branch, so a config file pushed to it
               # is seen by the next run.
               - name: workspace_repository_branch
@@ -205,7 +205,7 @@ pipeline:
                 value: https://app.harness.io/gateway
               - name: execution_cluster_connector
                 type: String
-                value: my_k8s_runner
+                value: ekshubsda
               - name: execution_namespace
                 type: String
                 value: default
@@ -217,7 +217,7 @@ pipeline:
                 value: jfxs/opentofu-inventory:1.11
               - name: bootstrap_repository
                 type: String
-                value: harness-idp-service-request
+                value: harness-idp-examples
               - name: bootstrap_repository_connector
                 type: String
                 value: account.generic
@@ -240,7 +240,7 @@ pipeline:
               # Settings every workspace run shares, such as write_files = false.
               - name: workspace_terraform_variable_file
                 type: String
-                value: tofu/workspace.tfvars
+                value: service-request-new/workspace.tfvars
               - name: require_workspace_approval
                 type: String
                 value: <+pipeline.variables.require_workspace_approval>
@@ -321,12 +321,12 @@ pipeline:
       type: String
       required: true
       value: <+input>
-      description: Organization of the consumer project, for example example_org.
+      description: Organization of the consumer project, for example bau_payments.
     - name: project_identifier
       type: String
       required: true
       value: <+input>
-      description: Consumer project that owns the Services, for example example_project. It is also the folder under tofu/configs.
+      description: Consumer project that owns the Services, for example GCP_Project. It is also the folder under service-request-new/configs.
     - name: tofu_action
       type: String
       required: true
@@ -346,7 +346,7 @@ pipeline:
       type: String
       required: false
       value: <+input>
-      description: Request only. A type folder under tofu/modules/templates, for example cloudrun or helm.
+      description: Request only. A type folder under service-request-new/modules/templates, for example cloudrun or helm.
     - name: service_identifier
       type: String
       required: false

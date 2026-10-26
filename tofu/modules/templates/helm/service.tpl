@@ -2,7 +2,10 @@
 # deployment type: Harness manages the rollout and versioned rollback, and
 # canary or blue-green stay available. Same file format as every other type.
 # Inputs: identifier, service, config (the type's own values from the request):
-#   chart.connector_ref, chart.name, chart.version   (required) HTTP Helm repo
+#   chart.connector_ref, chart.name, chart.version   (required) Helm repo
+#   chart.connector_type                              (optional) OciHelmRepo selects an OCI
+#                                                     chart store; anything else, HTTP
+#   chart.base_path                                   (optional) OCI only
 #   values.connector_ref, values.repository, values.path (required) Git values file
 #   values.commit                                     (optional)
 #   variables                                         (optional) map of Service variables
@@ -35,9 +38,21 @@ yaml:
               type: HelmChart
               spec:
                 store:
+%{ if try(config.chart.connector_type, "") == "OciHelmRepo" ~}
+                  type: OciHelmChart
+                  spec:
+%{ if try(config.chart.base_path, "") != "" ~}
+                    basePath: ${jsonencode(config.chart.base_path)}
+%{ endif ~}
+                    config:
+                      type: Generic
+                      spec:
+                        connectorRef: ${jsonencode(config.chart.connector_ref)}
+%{ else ~}
                   type: Http
                   spec:
                     connectorRef: ${jsonencode(config.chart.connector_ref)}
+%{ endif ~}
                 chartName: ${jsonencode(config.chart.name)}
                 chartVersion: ${jsonencode(config.chart.version)}
                 helmVersion: V3

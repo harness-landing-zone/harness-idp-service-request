@@ -1,20 +1,26 @@
 # Request a Service: a one-off request for a new Service and one infrastructure
 # per environment. It triggers the Service Request pipeline in the
-# idp_orchestrator project, which opens a pull request with the config files,
+# IDP_Orchistrator project, which opens a pull request with the config files,
 # waits for approval, merges it and reconciles the project. Later changes are made by the platform team.
 #
-# The connector pickers list project-level connectors only, so a bare
-# identifier is the correct reference.
-# The deployment connector is chosen once above the environment rows: a dropdown
-# inside a row can only depend on top-level fields.
+# Connectors: each connector field lists, with the developer's own token, the
+# connectors of its type that they can view in the project, its organization and
+# the account (includeAllConnectorsAvailableAtScope). A row's identifier is bare
+# whatever its scope, so setContextData copies the row's orgIdentifier and
+# projectIdentifier into two read-only fields. The pipeline builds the scoped
+# reference from them (bare, org.<id> or account.<id>) and checks it in Harness.
+# There are no free-text connector fields: a developer can only pick what they see.
+# Context keys are global to the form, so a picker inside an array row cannot keep
+# its own scope. Helm's clusters are therefore three top-level groups (Dev, Staging,
+# Prod), and Cloud Run keeps one GCP connector above its environment rows.
 # The two type branches must not share a field name. When both defined
 # "environments", the Cloud Run row's GCP project showed as a plain text box:
 # the Helm definition, which has no such field, replaced the row's dropdown
-# settings. So the Helm list is kubernetes_environments.
+# settings.
 apiVersion: harness.io/v1
 kind: Workflow
-name: Request a Service
-identifier: request_service
+name: Request a Service (pull request)
+identifier: request_service_pull_request
 type: service
 owner: group:account/platform_team
 metadata:
@@ -34,7 +40,7 @@ spec:
       - title: Environments
         url: https://app.harness.io/ng/account/YOUR_ACCOUNT_ID/all/orgs/${{ parameters.organization_identifier }}/projects/${{ parameters.project_identifier }}/environments
       - title: Open pull requests
-        url: https://github.com/harness-landing-zone/harness-idp-service-request/pulls
+        url: https://github.com/harness-landing-zone/harness-idp-examples/pulls
     text:
       - title: What happens next
         content: |
@@ -46,7 +52,7 @@ spec:
           This is a one-off request: later changes go through the platform team.
   parameters:
     - title: Request a Service
-      description: Pick your project and the service type. The fields below the type change with it and list what already exists in your project. Choose the deployment connector once, then add one row per environment. Release values such as the Git revision and the image tag are chosen when you deploy, not here.
+      description: Pick your project and the service type. The fields below the type change with it. Connector lists show the connectors you can view in your project, its organization and the account. For Cloud Run, choose the GCP connector once, then add one row per environment. For Helm, choose an environment, a cluster and a namespace for each of Dev, Staging and Prod. Release values such as the Git revision and the image tag are chosen when you deploy, not here.
       ui:order:
         - organization_identifier
         - project_identifier
@@ -56,18 +62,40 @@ spec:
         - service_description
         - service_owner
         - git_connector
+        - git_connector_org
+        - git_connector_project
         - repository
         - manifest_path
         - gcp_connector
+        - gcp_connector_org
+        - gcp_connector_project
+        - environments
         - chart_connector
+        - chart_connector_org
+        - chart_connector_project
         - chart_name
+        - chart_base_path
         - chart_version
         - values_connector
+        - values_connector_org
+        - values_connector_project
         - values_repository
         - values_path
-        - cluster_connector
-        - environments
-        - kubernetes_environments
+        - dev_environment
+        - dev_cluster_connector
+        - dev_cluster_connector_org
+        - dev_cluster_connector_project
+        - dev_namespace
+        - staging_environment
+        - staging_cluster_connector
+        - staging_cluster_connector_org
+        - staging_cluster_connector_project
+        - staging_namespace
+        - prod_environment
+        - prod_cluster_connector
+        - prod_cluster_connector_org
+        - prod_cluster_connector_project
+        - prod_namespace
       required:
         - organization_identifier
         - project_identifier
@@ -140,15 +168,50 @@ spec:
                     const: cloudrun
               then:
                 properties:
-                  # Plain text for the POC: the dropdown lists project-level connectors
-                  # only and did not accept a typed value. Bring the dropdown back
-                  # when connector scopes are handled.
                   git_connector:
                     title: GitHub connector
                     type: string
-                    pattern: '^((account|org)\.)?[a-zA-Z_][a-zA-Z0-9_$]{0,127}$'
-                    ui:placeholder: account.generic
-                    description: Connector reference that reads the repository holding the Cloud Run manifest. Use the bare identifier for a project connector, or prefix it with org. or account. for a shared one.
+                    description: GitHub connector that reads the repository holding the Cloud Run manifest. If the list is empty, there is no GitHub connector you can use in your project, its organization or the account; ask the platform team, or create one in your project.
+                    ui:field: HarnessEntitySelector
+                    ui:options:
+                      path: /ng/api/connectors/listV2
+                      method: POST
+                      params:
+                        orgIdentifier: '{{ parameters.organization_identifier }}'
+                        projectIdentifier: '{{ parameters.project_identifier }}'
+                        includeAllConnectorsAvailableAtScope: 'true'
+                        pageIndex: '0'
+                        pageSize: '100'
+                      body:
+                        filterType: Connector
+                        types:
+                          - Github
+                      arraySelector: data.content
+                      valueSelector: connector.identifier
+                      labelSelector: connector.name
+                      title: GitHub connector
+                      placeholder: Select a GitHub connector
+                      searchQueryParam: searchTerm
+                      allowArbitraryValues: false
+                      setContextData:
+                        git_connector_org: connector.orgIdentifier
+                        git_connector_project: connector.projectIdentifier
+                  git_connector_org:
+                    title: GitHub connector organization
+                    type: string
+                    readonly: true
+                    description: Filled in from the connector you pick. Empty for an account connector.
+                    ui:field: ContextViewer
+                    ui:options:
+                      getContextData: ${{ formContext.git_connector_org }}
+                  git_connector_project:
+                    title: GitHub connector project
+                    type: string
+                    readonly: true
+                    description: Filled in from the connector you pick. Empty for an org or account connector.
+                    ui:field: ContextViewer
+                    ui:options:
+                      getContextData: ${{ formContext.git_connector_project }}
                   repository:
                     title: Application repository
                     type: string
@@ -164,17 +227,17 @@ spec:
                   gcp_connector:
                     title: GCP connector
                     type: string
-                    description: Your project's GCP connector, chosen once for every environment below. Deployments run as its identity.
+                    description: GCP connector, chosen once for every environment below. Deployments run as its identity. If the list is empty, there is no GCP connector you can use in your project, its organization or the account; ask the platform team, or create one in your project.
                     ui:field: HarnessEntitySelector
                     ui:options:
                       path: /ng/api/connectors/listV2
                       method: POST
                       params:
-                        orgIdentifier: "{{ parameters.organization_identifier }}"
-                        projectIdentifier: "{{ parameters.project_identifier }}"
-                        includeAllConnectorsAvailableAtScope: "false"
-                        pageIndex: "0"
-                        pageSize: "100"
+                        orgIdentifier: '{{ parameters.organization_identifier }}'
+                        projectIdentifier: '{{ parameters.project_identifier }}'
+                        includeAllConnectorsAvailableAtScope: 'true'
+                        pageIndex: '0'
+                        pageSize: '100'
                       body:
                         filterType: Connector
                         types:
@@ -186,6 +249,25 @@ spec:
                       placeholder: Select a GCP connector
                       searchQueryParam: searchTerm
                       allowArbitraryValues: false
+                      setContextData:
+                        gcp_connector_org: connector.orgIdentifier
+                        gcp_connector_project: connector.projectIdentifier
+                  gcp_connector_org:
+                    title: GCP connector organization
+                    type: string
+                    readonly: true
+                    description: Filled in from the connector you pick. Empty for an account connector.
+                    ui:field: ContextViewer
+                    ui:options:
+                      getContextData: ${{ formContext.gcp_connector_org }}
+                  gcp_connector_project:
+                    title: GCP connector project
+                    type: string
+                    readonly: true
+                    description: Filled in from the connector you pick. Empty for an org or account connector.
+                    ui:field: ContextViewer
+                    ui:options:
+                      getContextData: ${{ formContext.gcp_connector_project }}
                   environments:
                     title: Environments
                     description: One row per environment this Service deploys to. Use + to add another. Use each environment only once.
@@ -205,10 +287,10 @@ spec:
                           ui:options:
                             path: /ng/api/environmentsV2
                             params:
-                              orgIdentifier: "{{ parameters.organization_identifier }}"
-                              projectIdentifier: "{{ parameters.project_identifier }}"
-                              page: "0"
-                              size: "100"
+                              orgIdentifier: '{{ parameters.organization_identifier }}'
+                              projectIdentifier: '{{ parameters.project_identifier }}'
+                              page: '0'
+                              size: '100'
                             arraySelector: data.content
                             valueSelector: environment.identifier
                             labelSelector: environment.name
@@ -218,18 +300,22 @@ spec:
                         # Depends on the top-level connector, not on a field in
                         # this row. Verified call: POST, data.projects[] with id
                         # and name. Lists only the GCP projects the connector's
-                        # identity was granted a role in.
+                        # identity was granted a role in. It sends the bare
+                        # identifier, so it resolves a project-level connector only;
+                        # with a shared connector the list stays empty and the
+                        # developer types the project ID.
                         gcp_project:
                           title: GCP project
                           type: string
+                          description: Pick from the list, or type the GCP project ID if your GCP connector is shared at org or account level.
                           ui:field: HarnessEntitySelector
                           ui:options:
                             path: /ng/api/gcp/project
                             method: POST
                             params:
-                              orgIdentifier: "{{ parameters.organization_identifier }}"
-                              projectIdentifier: "{{ parameters.project_identifier }}"
-                              connectorRef: "{{ parameters.gcp_connector }}"
+                              orgIdentifier: '{{ parameters.organization_identifier }}'
+                              projectIdentifier: '{{ parameters.project_identifier }}'
+                              connectorRef: '{{ parameters.gcp_connector }}'
                             arraySelector: data.projects
                             valueSelector: id
                             labelSelector: name
@@ -261,7 +347,7 @@ spec:
                   chart_connector:
                     title: Helm chart repository
                     type: string
-                    description: Your project's HTTP Helm connector that hosts the chart.
+                    description: HTTP Helm or OCI Helm connector that hosts the chart. If the list is empty, there is no Helm repository connector you can use in your project, its organization or the account; ask the platform team, or create one in your project.
                     ui:field: HarnessEntitySelector
                     ui:options:
                       path: /ng/api/connectors/listV2
@@ -269,13 +355,14 @@ spec:
                       params:
                         orgIdentifier: '{{ parameters.organization_identifier }}'
                         projectIdentifier: '{{ parameters.project_identifier }}'
-                        includeAllConnectorsAvailableAtScope: 'false'
+                        includeAllConnectorsAvailableAtScope: 'true'
                         pageIndex: '0'
                         pageSize: '100'
                       body:
                         filterType: Connector
                         types:
                           - HttpHelmRepo
+                          - OciHelmRepo
                       arraySelector: data.content
                       valueSelector: connector.identifier
                       labelSelector: connector.name
@@ -283,25 +370,84 @@ spec:
                       placeholder: Select a Helm repository connector
                       searchQueryParam: searchTerm
                       allowArbitraryValues: false
+                      setContextData:
+                        chart_connector_org: connector.orgIdentifier
+                        chart_connector_project: connector.projectIdentifier
+                  chart_connector_org:
+                    title: Helm chart repository organization
+                    type: string
+                    readonly: true
+                    description: Filled in from the connector you pick. Empty for an account connector.
+                    ui:field: ContextViewer
+                    ui:options:
+                      getContextData: ${{ formContext.chart_connector_org }}
+                  chart_connector_project:
+                    title: Helm chart repository project
+                    type: string
+                    readonly: true
+                    description: Filled in from the connector you pick. Empty for an org or account connector.
+                    ui:field: ContextViewer
+                    ui:options:
+                      getContextData: ${{ formContext.chart_connector_project }}
                   chart_name:
                     title: Chart name
                     type: string
                     pattern: ^[a-zA-Z0-9][a-zA-Z0-9_./-]*$
+                  chart_base_path:
+                    title: Chart base path
+                    type: string
+                    pattern: ^[a-zA-Z0-9_./-]*$
+                    description: OCI repositories only, the path under the connector's URL that holds the chart. Leave empty for an HTTP Helm repository.
                   chart_version:
                     title: Chart version
                     type: string
                     pattern: ^[0-9]+\.[0-9]+\.[0-9]+([+-][a-zA-Z0-9.-]+)?$
                     ui:placeholder: 1.2.3
                     description: Version of the shared Helm chart to use for this service.
-                  # Plain text for the POC: the dropdown lists project-level connectors
-                  # only and did not accept a typed value. Bring the dropdown back
-                  # when connector scopes are handled.
                   values_connector:
                     title: GitHub connector for values
                     type: string
-                    pattern: '^((account|org)\.)?[a-zA-Z_][a-zA-Z0-9_$]{0,127}$'
-                    ui:placeholder: account.generic
-                    description: Connector reference that reads the repository holding the Helm values file. Use the bare identifier for a project connector, or prefix it with org. or account. for a shared one.
+                    description: GitHub connector that reads the repository holding the Helm values file. If the list is empty, there is no GitHub connector you can use in your project, its organization or the account; ask the platform team, or create one in your project.
+                    ui:field: HarnessEntitySelector
+                    ui:options:
+                      path: /ng/api/connectors/listV2
+                      method: POST
+                      params:
+                        orgIdentifier: '{{ parameters.organization_identifier }}'
+                        projectIdentifier: '{{ parameters.project_identifier }}'
+                        includeAllConnectorsAvailableAtScope: 'true'
+                        pageIndex: '0'
+                        pageSize: '100'
+                      body:
+                        filterType: Connector
+                        types:
+                          - Github
+                      arraySelector: data.content
+                      valueSelector: connector.identifier
+                      labelSelector: connector.name
+                      title: GitHub connector for values
+                      placeholder: Select a GitHub connector
+                      searchQueryParam: searchTerm
+                      allowArbitraryValues: false
+                      setContextData:
+                        values_connector_org: connector.orgIdentifier
+                        values_connector_project: connector.projectIdentifier
+                  values_connector_org:
+                    title: Values connector organization
+                    type: string
+                    readonly: true
+                    description: Filled in from the connector you pick. Empty for an account connector.
+                    ui:field: ContextViewer
+                    ui:options:
+                      getContextData: ${{ formContext.values_connector_org }}
+                  values_connector_project:
+                    title: Values connector project
+                    type: string
+                    readonly: true
+                    description: Filled in from the connector you pick. Empty for an org or account connector.
+                    ui:field: ContextViewer
+                    ui:options:
+                      getContextData: ${{ formContext.values_connector_project }}
                   values_repository:
                     title: Values repository
                     type: string
@@ -311,20 +457,37 @@ spec:
                     type: string
                     pattern: ^[a-zA-Z0-9][a-zA-Z0-9_./-]*\.ya?ml$
                     default: deploy/helm/values.yaml
-                  cluster_connector:
-                    title: Cluster
+                  dev_environment:
+                    title: Dev environment
                     type: string
-                    description: Your project's Kubernetes connector the chart deploys to, chosen once for every environment below.
+                    ui:field: HarnessEntitySelector
+                    ui:options:
+                      path: /ng/api/environmentsV2
+                      params:
+                        orgIdentifier: '{{ parameters.organization_identifier }}'
+                        projectIdentifier: '{{ parameters.project_identifier }}'
+                        page: '0'
+                        size: '100'
+                      arraySelector: data.content
+                      valueSelector: environment.identifier
+                      labelSelector: environment.name
+                      title: Dev environment
+                      placeholder: Select an environment
+                      allowArbitraryValues: false
+                  dev_cluster_connector:
+                    title: Dev cluster
+                    type: string
+                    description: Kubernetes connector the chart deploys to in Dev. If the list is empty, there is no Kubernetes connector you can use in your project, its organization or the account; ask the platform team, or create one in your project.
                     ui:field: HarnessEntitySelector
                     ui:options:
                       path: /ng/api/connectors/listV2
                       method: POST
                       params:
-                        orgIdentifier: "{{ parameters.organization_identifier }}"
-                        projectIdentifier: "{{ parameters.project_identifier }}"
-                        includeAllConnectorsAvailableAtScope: "false"
-                        pageIndex: "0"
-                        pageSize: "100"
+                        orgIdentifier: '{{ parameters.organization_identifier }}'
+                        projectIdentifier: '{{ parameters.project_identifier }}'
+                        includeAllConnectorsAvailableAtScope: 'true'
+                        pageIndex: '0'
+                        pageSize: '100'
                       body:
                         filterType: Connector
                         types:
@@ -332,44 +495,166 @@ spec:
                       arraySelector: data.content
                       valueSelector: connector.identifier
                       labelSelector: connector.name
-                      title: Cluster
+                      title: Dev cluster
                       placeholder: Select a Kubernetes connector
                       searchQueryParam: searchTerm
                       allowArbitraryValues: false
-                  # Own name on purpose: see the header comment.
-                  kubernetes_environments:
-                    title: Environments
-                    description: One row per environment this Service deploys to. Use + to add another. Use each environment only once.
-                    type: array
-                    minItems: 1
-                    items:
-                      type: object
-                      required:
-                        - environment
-                        - namespace
-                      properties:
-                        environment:
-                          title: Environment
-                          type: string
-                          ui:field: HarnessEntitySelector
-                          ui:options:
-                            path: /ng/api/environmentsV2
-                            params:
-                              orgIdentifier: "{{ parameters.organization_identifier }}"
-                              projectIdentifier: "{{ parameters.project_identifier }}"
-                              page: "0"
-                              size: "100"
-                            arraySelector: data.content
-                            valueSelector: environment.identifier
-                            labelSelector: environment.name
-                            title: Environment
-                            placeholder: Select an environment
-                            allowArbitraryValues: false
-                        namespace:
-                          title: Namespace
-                          type: string
-                          pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
-                          description: Namespace to deploy into. This form does not create it.
+                      setContextData:
+                        dev_cluster_connector_org: connector.orgIdentifier
+                        dev_cluster_connector_project: connector.projectIdentifier
+                  dev_cluster_connector_org:
+                    title: Dev cluster organization
+                    type: string
+                    readonly: true
+                    description: Filled in from the connector you pick. Empty for an account connector.
+                    ui:field: ContextViewer
+                    ui:options:
+                      getContextData: ${{ formContext.dev_cluster_connector_org }}
+                  dev_cluster_connector_project:
+                    title: Dev cluster project
+                    type: string
+                    readonly: true
+                    description: Filled in from the connector you pick. Empty for an org or account connector.
+                    ui:field: ContextViewer
+                    ui:options:
+                      getContextData: ${{ formContext.dev_cluster_connector_project }}
+                  dev_namespace:
+                    title: Dev namespace
+                    type: string
+                    pattern: ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
+                    description: Namespace to deploy into. This form does not create it.
+                  staging_environment:
+                    title: Staging environment
+                    type: string
+                    ui:field: HarnessEntitySelector
+                    ui:options:
+                      path: /ng/api/environmentsV2
+                      params:
+                        orgIdentifier: '{{ parameters.organization_identifier }}'
+                        projectIdentifier: '{{ parameters.project_identifier }}'
+                        page: '0'
+                        size: '100'
+                      arraySelector: data.content
+                      valueSelector: environment.identifier
+                      labelSelector: environment.name
+                      title: Staging environment
+                      placeholder: Select an environment
+                      allowArbitraryValues: false
+                  staging_cluster_connector:
+                    title: Staging cluster
+                    type: string
+                    description: Kubernetes connector the chart deploys to in Staging. If the list is empty, there is no Kubernetes connector you can use in your project, its organization or the account; ask the platform team, or create one in your project.
+                    ui:field: HarnessEntitySelector
+                    ui:options:
+                      path: /ng/api/connectors/listV2
+                      method: POST
+                      params:
+                        orgIdentifier: '{{ parameters.organization_identifier }}'
+                        projectIdentifier: '{{ parameters.project_identifier }}'
+                        includeAllConnectorsAvailableAtScope: 'true'
+                        pageIndex: '0'
+                        pageSize: '100'
+                      body:
+                        filterType: Connector
+                        types:
+                          - K8sCluster
+                      arraySelector: data.content
+                      valueSelector: connector.identifier
+                      labelSelector: connector.name
+                      title: Staging cluster
+                      placeholder: Select a Kubernetes connector
+                      searchQueryParam: searchTerm
+                      allowArbitraryValues: false
+                      setContextData:
+                        staging_cluster_connector_org: connector.orgIdentifier
+                        staging_cluster_connector_project: connector.projectIdentifier
+                  staging_cluster_connector_org:
+                    title: Staging cluster organization
+                    type: string
+                    readonly: true
+                    description: Filled in from the connector you pick. Empty for an account connector.
+                    ui:field: ContextViewer
+                    ui:options:
+                      getContextData: ${{ formContext.staging_cluster_connector_org }}
+                  staging_cluster_connector_project:
+                    title: Staging cluster project
+                    type: string
+                    readonly: true
+                    description: Filled in from the connector you pick. Empty for an org or account connector.
+                    ui:field: ContextViewer
+                    ui:options:
+                      getContextData: ${{ formContext.staging_cluster_connector_project }}
+                  staging_namespace:
+                    title: Staging namespace
+                    type: string
+                    pattern: ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
+                    description: Namespace to deploy into. This form does not create it.
+                  prod_environment:
+                    title: Prod environment
+                    type: string
+                    ui:field: HarnessEntitySelector
+                    ui:options:
+                      path: /ng/api/environmentsV2
+                      params:
+                        orgIdentifier: '{{ parameters.organization_identifier }}'
+                        projectIdentifier: '{{ parameters.project_identifier }}'
+                        page: '0'
+                        size: '100'
+                      arraySelector: data.content
+                      valueSelector: environment.identifier
+                      labelSelector: environment.name
+                      title: Prod environment
+                      placeholder: Select an environment
+                      allowArbitraryValues: false
+                  prod_cluster_connector:
+                    title: Prod cluster
+                    type: string
+                    description: Kubernetes connector the chart deploys to in Prod. If the list is empty, there is no Kubernetes connector you can use in your project, its organization or the account; ask the platform team, or create one in your project.
+                    ui:field: HarnessEntitySelector
+                    ui:options:
+                      path: /ng/api/connectors/listV2
+                      method: POST
+                      params:
+                        orgIdentifier: '{{ parameters.organization_identifier }}'
+                        projectIdentifier: '{{ parameters.project_identifier }}'
+                        includeAllConnectorsAvailableAtScope: 'true'
+                        pageIndex: '0'
+                        pageSize: '100'
+                      body:
+                        filterType: Connector
+                        types:
+                          - K8sCluster
+                      arraySelector: data.content
+                      valueSelector: connector.identifier
+                      labelSelector: connector.name
+                      title: Prod cluster
+                      placeholder: Select a Kubernetes connector
+                      searchQueryParam: searchTerm
+                      allowArbitraryValues: false
+                      setContextData:
+                        prod_cluster_connector_org: connector.orgIdentifier
+                        prod_cluster_connector_project: connector.projectIdentifier
+                  prod_cluster_connector_org:
+                    title: Prod cluster organization
+                    type: string
+                    readonly: true
+                    description: Filled in from the connector you pick. Empty for an account connector.
+                    ui:field: ContextViewer
+                    ui:options:
+                      getContextData: ${{ formContext.prod_cluster_connector_org }}
+                  prod_cluster_connector_project:
+                    title: Prod cluster project
+                    type: string
+                    readonly: true
+                    description: Filled in from the connector you pick. Empty for an org or account connector.
+                    ui:field: ContextViewer
+                    ui:options:
+                      getContextData: ${{ formContext.prod_cluster_connector_project }}
+                  prod_namespace:
+                    title: Prod namespace
+                    type: string
+                    pattern: ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
+                    description: Namespace to deploy into. This form does not create it.
                 required:
                   - chart_connector
                   - chart_name
@@ -377,14 +662,21 @@ spec:
                   - values_connector
                   - values_repository
                   - values_path
-                  - cluster_connector
-                  - kubernetes_environments
+                  - dev_environment
+                  - dev_cluster_connector
+                  - dev_namespace
+                  - staging_environment
+                  - staging_cluster_connector
+                  - staging_namespace
+                  - prod_environment
+                  - prod_cluster_connector
+                  - prod_namespace
   steps:
     - id: trigger
       name: Request the Service
       action: trigger:harness-custom-pipeline
       input:
-        url: https://app.harness.io/ng/account/YOUR_ACCOUNT_ID/all/orgs/harness_platform_accelerator/projects/idp_orchestrator/pipelines/Service_Request/pipeline-studio?storeType=INLINE
+        url: https://app.harness.io/ng/account/YOUR_ACCOUNT_ID/all/orgs/harness_platform_accelerator/projects/IDP_Orchistrator/pipelines/Service_Request/pipeline-studio?storeType=INLINE
         inputset:
           pipeline.variables.request_action: request
           pipeline.variables.tofu_action: apply
@@ -397,14 +689,24 @@ spec:
           pipeline.variables.service_owner: ${{ parameters.service_owner }}
           pipeline.variables.service_description: ${{ parameters.service_description }}
           # The type's values travel as one JSON object each, so the pipeline
-          # stays the same whatever the type. The expressions hold quotes, braces
-          # and colons, so they sit in a YAML block scalar (>-) to stay plain text.
+          # stays the same whatever the type. Each connector travels as
+          # {"connector": {"identifier", "org", "project"}}; the pipeline turns it
+          # into a scoped connector_ref. The expressions hold quotes, braces and
+          # colons, so they sit in a YAML block scalar (>-) to stay plain text.
           pipeline.variables.service_config: >-
-            ${{ ({ "git": { "connector_ref": parameters.git_connector, "repository": parameters.repository, "path": parameters.manifest_path } } if parameters.service_type == 'cloudrun' else { "chart": { "connector_ref": parameters.chart_connector, "name": parameters.chart_name, "version": parameters.chart_version }, "values": { "connector_ref": parameters.values_connector, "repository": parameters.values_repository, "path": parameters.values_path } }) | dump }}
-          # The deployment connector, chosen once, and the environment rows as the
-          # form holds them. The pipeline turns the rows into a map keyed by
-          # environment, each with the connector.
+            ${{ ({ "git": { "connector": { "identifier": parameters.git_connector, "org": parameters.git_connector_org, "project": parameters.git_connector_project }, "repository": parameters.repository, "path": parameters.manifest_path } }
+            if parameters.service_type == 'cloudrun' else
+            { "chart": { "connector": { "identifier": parameters.chart_connector, "org": parameters.chart_connector_org, "project": parameters.chart_connector_project }, "name": parameters.chart_name, "base_path": parameters.chart_base_path, "version": parameters.chart_version },
+            "values": { "connector": { "identifier": parameters.values_connector, "org": parameters.values_connector_org, "project": parameters.values_connector_project }, "repository": parameters.values_repository, "path": parameters.values_path } }) | dump }}
+          # Cloud Run: the GCP connector once and the environment rows as the
+          # form holds them. Helm: one row per slot, each with its own cluster.
+          # The pipeline turns the rows into a map keyed by environment.
           pipeline.variables.service_infrastructure: >-
-            ${{ ({ "connector_ref": (parameters.gcp_connector if parameters.service_type == 'cloudrun' else parameters.cluster_connector), "environments": (parameters.environments if parameters.service_type == 'cloudrun' else parameters.kubernetes_environments) }) | dump }}
-        apiKeySecret: idp_workflow_runner_token
+            ${{ ({ "connector": { "identifier": parameters.gcp_connector, "org": parameters.gcp_connector_org, "project": parameters.gcp_connector_project }, "environments": parameters.environments }
+            if parameters.service_type == 'cloudrun' else
+            { "environments": [
+            { "slot": "Dev", "environment": parameters.dev_environment, "namespace": parameters.dev_namespace, "connector": { "identifier": parameters.dev_cluster_connector, "org": parameters.dev_cluster_connector_org, "project": parameters.dev_cluster_connector_project } },
+            { "slot": "Staging", "environment": parameters.staging_environment, "namespace": parameters.staging_namespace, "connector": { "identifier": parameters.staging_cluster_connector, "org": parameters.staging_cluster_connector_org, "project": parameters.staging_cluster_connector_project } },
+            { "slot": "Prod", "environment": parameters.prod_environment, "namespace": parameters.prod_namespace, "connector": { "identifier": parameters.prod_cluster_connector, "org": parameters.prod_cluster_connector_org, "project": parameters.prod_cluster_connector_project } } ] }) | dump }}
+        apiKeySecret: idp_service_requests_token
         showOutputVariables: true

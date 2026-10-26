@@ -1,7 +1,7 @@
 ---
-# Input set that sends exactly what the IDP form sends: the connector chosen
-# once and the environment rows as a list. It tests the pipeline's row-to-map
-# translation without IDP. Requests the Cloud Run Service payments_api with a
+# Input set that sends what the IDP form sends once Service Request has scoped
+# its connectors: the connector reference chosen once and the environment rows
+# as a list. It tests the pipeline's row-to-map translation without IDP. Requests the Cloud Run Service payments_api with a
 # dev and a staging infrastructure in example_org/example_project, then applies
 # after manual approval.
 inputSet:

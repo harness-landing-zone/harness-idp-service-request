@@ -1,9 +1,10 @@
 ---
-# Service Request (idp_orchestrator)
+# Service Request (IDP_Orchistrator)
 # One linear run per request:
 #   1. Serialize          one run at a time per requested Service
-#   2. Publish Request    render the Service and infrastructure files, push them to a
-#                         request branch, open a pull request. Creates nothing.
+#   2. Publish Request    scope and check the chosen connectors, render the Service and
+#                         infrastructure files, push them to a request branch, open a
+#                         pull request. Creates nothing.
 #   3. Review Request     Harness approval. The run waits here, without using a build
 #                         machine, while the pull request is reviewed.
 #   4. Merge Request      after approval, merge the pull request (or accept that a
@@ -15,10 +16,11 @@
 pipeline:
   name: Service Request
   identifier: Service_Request
-  projectIdentifier: idp_orchestrator
+  projectIdentifier: IDP_Orchistrator
   orgIdentifier: harness_platform_accelerator
   description: Entry point for the IDP service request form. Renders the Service and its infrastructure as config files, opens a pull request, waits for approval, merges the pull request and then chains Project Service Reconcile in platform_management. With request_action reconcile it only reconciles a project.
   tags:
+    idp_access: service_requests
     purpose: service_request
     role: orchestrator
     status: poc
@@ -66,12 +68,148 @@ pipeline:
                   timeout: 10m
                   spec:
                     connectorRef: account.generic
-                    repoName: harness-idp-service-request
+                    repoName: harness-idp-examples
                     cloneDirectory: /harness/clone
                     build:
                       type: branch
                       spec:
                         branch: main
+              - step:
+                  type: Run
+                  name: Resolve Connectors
+                  identifier: Resolve_Connectors
+                  description: Turns each connector the form picked into a reference scoped to where the connector lives, and checks in Harness that it exists and has an expected type.
+                  timeout: 10m
+                  spec:
+                    connectorRef: account.DockerHub
+                    image: alpine:3.20
+                    shell: Sh
+                    command: |
+                      set -eu
+                      apk add --no-cache curl jq >/dev/null
+                      # Unset optional runtime inputs may resolve to the literal string null.
+                      [ -n "$SERVICE_CONFIG" ] && [ "$SERVICE_CONFIG" != "null" ] || SERVICE_CONFIG='{}'
+                      [ -n "$SERVICE_INFRASTRUCTURE" ] && [ "$SERVICE_INFRASTRUCTURE" != "null" ] || SERVICE_INFRASTRUCTURE='{}'
+
+                      # The form sends each connector as {"connector": {"identifier", "org", "project"}}:
+                      # the picked row's bare identifier and the scope it lives in. The reference
+                      # follows the scope: a project gives the bare identifier, only an org gives
+                      # org.<id>, neither gives account.<id>. Each reference is then read back from
+                      # Harness, so a wrong scope or a connector of the wrong type stops the request
+                      # here, and its type is kept as connector_type (the Helm template picks an
+                      # HTTP or OCI chart store from it). A value already given as connector_ref,
+                      # as in a hand-started run, passes through unchanged.
+                      # If the scope did not arrive (the form's read-only fields were not sent), the
+                      # reference falls back to a wider scope than the one picked. So an account or
+                      # org reference is also looked up in the narrower scopes, and the run stops if
+                      # the same identifier exists there: the form did not say which one was picked.
+                      # $1 is the JSON; $2 maps the key holding a connector (git, values, chart) to
+                      # its allowed types, with "*" for any other. A connector is named in messages
+                      # by that key, or by its row's slot or environment.
+
+                      # Prints the type of connector $1 at scope $2, or nothing when Harness says it
+                      # is not there (HTTP 404 or RESOURCE_NOT_FOUND_EXCEPTION). Any other answer, such
+                      # as a network error or a denied request, stops the run: an outage must not
+                      # pass for "not there" and hide a second connector.
+                      lookup() {
+                        body=$(mktemp)
+                        status=$(curl -sS --connect-timeout 10 --max-time 40 --retry 3 -o "$body" -w '%{http_code}' \
+                          -H "x-api-key: $HARNESS_API_KEY" "$HARNESS_ENDPOINT/ng/api/connectors/$1?accountIdentifier=$ACCOUNT$2") || status="no answer"
+                        case $status in
+                          200) jq -r '.data.connector.type // empty' "$body" ;;
+                          404) ;;
+                          *)
+                            if [ "$(jq -r '.code? // empty' "$body" 2>/dev/null)" != RESOURCE_NOT_FOUND_EXCEPTION ]; then
+                              echo "Could not read connector $1 from Harness (HTTP $status): $(head -c 300 "$body")" >&2
+                              return 1
+                            fi ;;
+                        esac
+                      }
+
+                      resolve() {
+                        json=$1
+                        items=$(mktemp)
+                        printf '%s' "$json" | jq -r '
+                          def unset: . == null or . == "" or . == "null";
+                          path(.. | objects | select(has("connector"))) as $path
+                          | getpath($path).connector as $c
+                          | ((getpath($path) | .slot // .environment) // ([$path[] | strings] | last) // "infrastructure") as $key
+                          | if $c.identifier | unset then error("no connector was chosen for \($key)") else . end
+                          | (if ($c.project | unset | not) then $c.identifier
+                             elif ($c.org | unset | not) then "org.\($c.identifier)"
+                             else "account.\($c.identifier)" end) as $ref
+                          | [$key, $c.identifier, $ref, ($path | tojson)] | join("|")' > "$items" || return 1
+                        project_scope="&orgIdentifier=$ORGANIZATION&projectIdentifier=$PROJECT"
+                        org_scope="&orgIdentifier=$ORGANIZATION"
+                        while IFS='|' read -r key id ref path; do
+                          case $ref in
+                            account.*) scope=""; narrower="project:$project_scope org:$org_scope" ;;
+                            org.*) scope=$org_scope; narrower="project:$project_scope" ;;
+                            *) scope=$project_scope; narrower="" ;;
+                          esac
+                          type=$(lookup "$id" "$scope") || return 1
+                          also=""
+                          for at in $narrower; do
+                            found=$(lookup "$id" "${at#*:}") || return 1
+                            [ -z "$found" ] || also="${also:+$also and }${at%%:*}"
+                          done
+                          if [ -n "$also" ] && [ -n "$type" ]; then
+                            echo "Connector $id (for $key) exists at $also scope as well as ${ref%%.*} scope, and the form did not send which one was picked. Re-select it in the form, or ask the platform team." >&2
+                            return 1
+                          elif [ -n "$also" ]; then
+                            echo "Connector $id (for $key) exists only at $also scope, but the form did not send that scope. Re-select it in the form, or ask the platform team." >&2
+                            return 1
+                          fi
+                          if [ -z "$type" ]; then
+                            echo "Connector $ref (for $key) was not found for $ORGANIZATION/$PROJECT, or this pipeline's API key cannot view it." >&2
+                            return 1
+                          fi
+                          allowed=$(printf '%s' "$2" | jq -r --arg key "$key" '.[$key] // .["*"] // [] | join(" ")')
+                          case " $allowed " in
+                            *" $type "*) ;;
+                            *) echo "Connector $ref (for $key) is a $type connector, but needs one of: $allowed." >&2; return 1 ;;
+                          esac
+                          json=$(printf '%s' "$json" | jq -c --argjson path "$path" --arg ref "$ref" --arg type "$type" \
+                            'setpath($path; getpath($path) | del(.connector) + {connector_ref: $ref, connector_type: $type})') || return 1
+                        done < "$items"
+                        printf '%s' "$json"
+                      }
+
+                      case $SERVICE_TYPE in
+                        cloudrun) CLUSTER_TYPES='["Gcp"]' ;;
+                        helm) CLUSTER_TYPES='["K8sCluster"]' ;;
+                        *) CLUSTER_TYPES='[]' ;;
+                      esac
+                      SERVICE_CONFIG=$(resolve "$SERVICE_CONFIG" '{"git": ["Github"], "values": ["Github"], "chart": ["HttpHelmRepo", "OciHelmRepo"]}')
+                      SERVICE_INFRASTRUCTURE=$(resolve "$SERVICE_INFRASTRUCTURE" "{\"*\": $CLUSTER_TYPES}")
+
+                      # Helm sends one row per slot, each with its own cluster.
+                      if ! printf '%s' "$SERVICE_INFRASTRUCTURE" | jq -e '
+                        if any(.environments[]?; has("slot")) then ([.environments[].slot] | sort) == ["Dev", "Prod", "Staging"] else true end' >/dev/null; then
+                        echo "Dev, Staging and Prod must each be listed exactly once." >&2
+                        exit 1
+                      fi
+                      echo "Config: $SERVICE_CONFIG"
+                      echo "Infrastructure: $SERVICE_INFRASTRUCTURE"
+                      export SERVICE_CONFIG SERVICE_INFRASTRUCTURE
+                    envVariables:
+                      HARNESS_ENDPOINT: https://app.harness.io/gateway
+                      # Reads connectors only. Its service account needs connector View in
+                      # the consumer projects, their organizations and the account.
+                      HARNESS_API_KEY: <+secrets.getValue("account.idp_service_requests_token")>
+                      ACCOUNT: <+account.identifier>
+                      ORGANIZATION: <+pipeline.variables.organization_identifier>
+                      PROJECT: <+pipeline.variables.project_identifier>
+                      SERVICE_TYPE: <+pipeline.variables.service_type>
+                      SERVICE_CONFIG: <+pipeline.variables.service_config>
+                      SERVICE_INFRASTRUCTURE: <+pipeline.variables.service_infrastructure>
+                    outputVariables:
+                      - name: SERVICE_CONFIG
+                        type: String
+                        value: SERVICE_CONFIG
+                      - name: SERVICE_INFRASTRUCTURE
+                        type: String
+                        value: SERVICE_INFRASTRUCTURE
               - step:
                   type: Run
                   name: Render Request
@@ -98,12 +236,14 @@ pipeline:
                       done
                       [ -n "$SERVICE_CONFIG" ] || SERVICE_CONFIG='{}'
                       [ -n "$SERVICE_INFRASTRUCTURE" ] || SERVICE_INFRASTRUCTURE='{}'
-                      # The IDP form sends {"connector_ref": ..., "environments": [rows]},
-                      # with any other value chosen once beside them; input sets send the
-                      # map keyed by environment. Rows become that map: each row gets the
-                      # shared values, and its own values win. A row's cluster_connector
-                      # becomes connector_ref, and gcp_project and gcp_region become the
-                      # template keys project and region. A repeated environment fails here.
+                      # After Resolve Connectors the IDP form's values are {"connector_ref": ...,
+                      # "environments": [rows]}, with any other value chosen once beside them,
+                      # or rows with their own connector_ref (Helm's Dev, Staging and Prod);
+                      # input sets send the map keyed by environment. Rows become that map:
+                      # each row gets the shared values, and its own values win. A row's
+                      # cluster_connector becomes connector_ref, and gcp_project and gcp_region
+                      # become the template keys project and region. A repeated environment
+                      # fails here.
                       SERVICE_INFRASTRUCTURE=$(printf '%s' "$SERVICE_INFRASTRUCTURE" | jq -c '
                         if (.environments | type) == "array" then
                           . as $form
@@ -120,7 +260,7 @@ pipeline:
                       # A request creates a Service; it must not replace one that already
                       # exists, whatever its type. Later changes are made in Git, or by
                       # running this pipeline by hand with allow_update = true.
-                      EXISTING=$(find "/harness/publish/tofu/configs/organizations/$TF_VAR_organization_identifier/projects/$TF_VAR_project_identifier/services" \
+                      EXISTING=$(find "/harness/publish/service-request-new/configs/organizations/$TF_VAR_organization_identifier/projects/$TF_VAR_project_identifier/services" \
                         -name "$SERVICE_IDENTIFIER.yaml" 2>/dev/null | head -1)
                       if [ -n "$EXISTING" ] && [ "$ALLOW_UPDATE" != "true" ]; then
                         echo "Service $SERVICE_IDENTIFIER already exists in $TF_VAR_organization_identifier/$TF_VAR_project_identifier: ${EXISTING#/harness/publish/}" >&2
@@ -128,7 +268,7 @@ pipeline:
                         exit 1
                       fi
 
-                      cd /harness/publish/tofu
+                      cd /harness/publish/service-request-new
                       export TF_DATA_DIR=/harness/render/.terraform
                       mkdir -p /harness/render
                       # Only local files are written; the Harness provider is never called.
@@ -139,8 +279,8 @@ pipeline:
                         -target=module.harness_infrastructures.local_file.rendered
 
                       CHANGED=false
-                      if [ -n "$(git -c safe.directory=/harness/publish -C /harness/publish status --porcelain -- tofu/configs)" ]; then CHANGED=true; fi
-                      git -c safe.directory=/harness/publish -C /harness/publish status --short -- tofu/configs
+                      if [ -n "$(git -c safe.directory=/harness/publish -C /harness/publish status --porcelain -- service-request-new/configs)" ]; then CHANGED=true; fi
+                      git -c safe.directory=/harness/publish -C /harness/publish status --short -- service-request-new/configs
                       export CHANGED
                     envVariables:
                       TF_IN_AUTOMATION: "true"
@@ -153,8 +293,8 @@ pipeline:
                       SERVICE_NAME: <+pipeline.variables.service_name>
                       SERVICE_OWNER: <+pipeline.variables.service_owner>
                       SERVICE_DESCRIPTION: <+pipeline.variables.service_description>
-                      SERVICE_CONFIG: <+pipeline.variables.service_config>
-                      SERVICE_INFRASTRUCTURE: <+pipeline.variables.service_infrastructure>
+                      SERVICE_CONFIG: <+pipeline.stages.Publish_Request.spec.execution.steps.Resolve_Connectors.output.outputVariables.SERVICE_CONFIG>
+                      SERVICE_INFRASTRUCTURE: <+pipeline.stages.Publish_Request.spec.execution.steps.Resolve_Connectors.output.outputVariables.SERVICE_INFRASTRUCTURE>
                       ALLOW_UPDATE: <+pipeline.variables.allow_update>
                     outputVariables:
                       - name: CHANGED
@@ -220,13 +360,13 @@ pipeline:
                       echo "Pull request: $PR_URL"
                       export PR_URL PR_NUMBER
                     envVariables:
-                      GITHUB_APP_ID: "YOUR_GITHUB_APP_ID"
-                      GITHUB_APP_INSTALLATION_ID: "YOUR_GITHUB_APP_INSTALLATION_ID"
-                      GITHUB_APP_PRIVATE_KEY: <+secrets.getValue("account.github_app_private_key")>
+                      GITHUB_APP_ID: "2780955"
+                      GITHUB_APP_INSTALLATION_ID: "107783082"
+                      GITHUB_APP_PRIVATE_KEY: <+secrets.getValue("account.common-repos")>
                       GITHUB_OWNER: harness-landing-zone
-                      GITHUB_REPOSITORY: harness-idp-service-request
+                      GITHUB_REPOSITORY: harness-idp-examples
                       BASE_BRANCH: main
-                      CONFIGS_PATH: tofu/configs
+                      CONFIGS_PATH: service-request-new/configs
                       REQUEST_BRANCH: request/<+pipeline.variables.organization_identifier>/<+pipeline.variables.project_identifier>/<+pipeline.variables.service_identifier>
                       ORGANIZATION: <+pipeline.variables.organization_identifier>
                       PROJECT: <+pipeline.variables.project_identifier>
@@ -349,11 +489,11 @@ pipeline:
                       curl -sS -o /dev/null --connect-timeout 10 --max-time 40 -X DELETE -H "$AUTH" \
                         "$API/git/refs/heads/$REQUEST_BRANCH" || true
                     envVariables:
-                      GITHUB_APP_ID: "YOUR_GITHUB_APP_ID"
-                      GITHUB_APP_INSTALLATION_ID: "YOUR_GITHUB_APP_INSTALLATION_ID"
-                      GITHUB_APP_PRIVATE_KEY: <+secrets.getValue("account.github_app_private_key")>
+                      GITHUB_APP_ID: "2780955"
+                      GITHUB_APP_INSTALLATION_ID: "107783082"
+                      GITHUB_APP_PRIVATE_KEY: <+secrets.getValue("account.common-repos")>
                       GITHUB_OWNER: harness-landing-zone
-                      GITHUB_REPOSITORY: harness-idp-service-request
+                      GITHUB_REPOSITORY: harness-idp-examples
                       PR_NUMBER: <+pipeline.stages.Publish_Request.spec.execution.steps.Open_Pull_Request.output.outputVariables.PR_NUMBER>
                       REQUEST_BRANCH: request/<+pipeline.variables.organization_identifier>/<+pipeline.variables.project_identifier>/<+pipeline.variables.service_identifier>
         failureStrategies:
@@ -409,17 +549,17 @@ pipeline:
       type: String
       required: true
       value: <+input>
-      description: Organization of the consumer project, for example example_org.
+      description: Organization of the consumer project, for example bau_payments.
     - name: project_identifier
       type: String
       required: true
       value: <+input>
-      description: Consumer project that owns the Services, for example example_project. It is also the folder under tofu/configs.
+      description: Consumer project that owns the Services, for example GCP_Project. It is also the folder under service-request-new/configs.
     - name: service_type
       type: String
       required: false
       value: <+input>
-      description: A type folder under tofu/modules/templates, for example cloudrun or helm.
+      description: A type folder under service-request-new/modules/templates, for example cloudrun or helm.
     - name: service_identifier
       type: String
       required: false

@@ -3,9 +3,9 @@
 #   1. Configure Project Workspace   create or update the project's IaCM workspace
 #   2. Reconcile Project             make Harness match the files on main: plan, approve, apply
 # It carries no request. The config files are written and reviewed elsewhere
-# (the Service Request pipeline in idp_orchestrator opens the pull request);
+# (the Service Request pipeline in IDP_Orchistrator opens the pull request);
 # this pipeline only reconciles what main records for one consumer project.
-# Called by Service Reconcile in idp_orchestrator, or run by hand.
+# Called by Service Request in IDP_Orchistrator, or run by hand.
 pipeline:
   name: Project Service Reconcile
   identifier: Project_Service_Reconcile
@@ -13,6 +13,7 @@ pipeline:
   orgIdentifier: harness_platform_accelerator
   description: Create or update a consumer project's service workspace, then plan and apply what main records for that project. Carries no request. Apply requires manual approval.
   tags:
+    idp_access: service_requests
     purpose: service_request
     status: poc
   stages:
@@ -32,13 +33,13 @@ pipeline:
                 value: project_services
               - name: workspace_repository
                 type: String
-                value: harness-idp-service-request
+                value: harness-idp-examples
               - name: workspace_repository_connector
                 type: String
                 value: account.generic
               - name: workspace_repository_path
                 type: String
-                value: tofu
+                value: service-request-new
               # The workspace follows the branch, so a config file pushed to it
               # is seen by the next run.
               - name: workspace_repository_branch
@@ -55,7 +56,7 @@ pipeline:
                 value: https://app.harness.io/gateway
               - name: execution_cluster_connector
                 type: String
-                value: my_k8s_runner
+                value: ekshubsda
               - name: execution_namespace
                 type: String
                 value: default
@@ -67,7 +68,7 @@ pipeline:
                 value: jfxs/opentofu-inventory:1.11
               - name: bootstrap_repository
                 type: String
-                value: harness-idp-service-request
+                value: harness-idp-examples
               - name: bootstrap_repository_connector
                 type: String
                 value: account.generic
@@ -90,7 +91,7 @@ pipeline:
               # Settings every workspace run shares, such as write_files = false.
               - name: workspace_terraform_variable_file
                 type: String
-                value: tofu/workspace.tfvars
+                value: service-request-new/workspace.tfvars
               - name: require_workspace_approval
                 type: String
                 value: <+pipeline.variables.require_workspace_approval>
@@ -168,12 +169,12 @@ pipeline:
       type: String
       required: true
       value: <+input>
-      description: Organization of the consumer project, for example example_org.
+      description: Organization of the consumer project, for example bau_payments.
     - name: project_identifier
       type: String
       required: true
       value: <+input>
-      description: Consumer project that owns the Services, for example example_project. It is also the folder under tofu/configs.
+      description: Consumer project that owns the Services, for example GCP_Project. It is also the folder under service-request-new/configs.
     - name: tofu_action
       type: String
       required: true
