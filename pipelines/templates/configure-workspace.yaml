@@ -1,6 +1,6 @@
 ---
 template:
-  name: Configure Workspace Custom Template
+  name: Configure Service Request Workspace
   type: Stage
   spec:
     type: Custom
@@ -461,7 +461,6 @@ template:
         the branch.
       required: false
       value: "<+input>.default()"
-  identifier: Configure_Workspace_Custom_Template
-  versionLabel: v4
-  description: Optional immutable workspace revision for code and tfvars. Approval
-    defaults to true; v3 unchanged.
+  identifier: Configure_Service_Request_Workspace
+  versionLabel: v1
+  description: Dedicated Service Request workspace stage template. Approval defaults to true.

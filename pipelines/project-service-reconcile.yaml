@@ -3,9 +3,9 @@
 #   1. Configure Project Workspace   create or update the project's IaCM workspace
 #   2. Reconcile Project             make Harness match the files on main: plan, approve, apply
 # It carries no request. The config files are written and reviewed elsewhere
-# (the Service Request pipeline in IDP_Orchistrator opens the pull request);
+# (the Service Request pipeline in idp_orchestrator opens the pull request);
 # this pipeline only reconciles what main records for one consumer project.
-# Called by Service Request in IDP_Orchistrator, or run by hand.
+# Called by Service Request in idp_orchestrator, or run by hand.
 pipeline:
   name: Project Service Reconcile
   identifier: Project_Service_Reconcile
@@ -22,8 +22,8 @@ pipeline:
         identifier: Configure_Workspace
         description: Stateless workspace bootstrap. Preview, approve changes, replan and apply. Does not run the workspace.
         template:
-          templateRef: account.Configure_Workspace_Custom_Template
-          versionLabel: v4
+          templateRef: account.Configure_Service_Request_Workspace
+          versionLabel: v1
           templateInputs:
             type: Custom
             variables:
@@ -33,13 +33,13 @@ pipeline:
                 value: project_services
               - name: workspace_repository
                 type: String
-                value: harness-idp-examples
+                value: harness-idp-service-request
               - name: workspace_repository_connector
                 type: String
                 value: account.generic
               - name: workspace_repository_path
                 type: String
-                value: service-request-new
+                value: tofu
               # The workspace follows the branch, so a config file pushed to it
               # is seen by the next run.
               - name: workspace_repository_branch
@@ -56,7 +56,7 @@ pipeline:
                 value: https://app.harness.io/gateway
               - name: execution_cluster_connector
                 type: String
-                value: ekshubsda
+                value: hubcluster
               - name: execution_namespace
                 type: String
                 value: default
@@ -68,7 +68,7 @@ pipeline:
                 value: jfxs/opentofu-inventory:1.11
               - name: bootstrap_repository
                 type: String
-                value: harness-idp-examples
+                value: harness-idp-service-request
               - name: bootstrap_repository_connector
                 type: String
                 value: account.generic
@@ -84,14 +84,14 @@ pipeline:
                 value: "[]"
               - name: workspace_approver_group
                 type: String
-                value: account.container_team
+                value: account.platform_approvers
               - name: workspace_identifier
                 type: String
                 value: project_service_bootstrap_<+pipeline.variables.organization_identifier>_<+pipeline.variables.project_identifier>
               # Settings every workspace run shares, such as write_files = false.
               - name: workspace_terraform_variable_file
                 type: String
-                value: service-request-new/workspace.tfvars
+                value: tofu/workspace.tfvars
               - name: require_workspace_approval
                 type: String
                 value: <+pipeline.variables.require_workspace_approval>
@@ -169,12 +169,12 @@ pipeline:
       type: String
       required: true
       value: <+input>
-      description: Organization of the consumer project, for example bau_payments.
+      description: Organization of the consumer project, for example example_org.
     - name: project_identifier
       type: String
       required: true
       value: <+input>
-      description: Consumer project that owns the Services, for example GCP_Project. It is also the folder under service-request-new/configs.
+      description: Consumer project that owns the Services, for example example_project. It is also the folder under tofu/configs.
     - name: tofu_action
       type: String
       required: true

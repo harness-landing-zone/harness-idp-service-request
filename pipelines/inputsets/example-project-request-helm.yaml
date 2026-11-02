@@ -1,0 +1,51 @@
+---
+# Troubleshooting input set (Layer 2 - Orchestrator without IDP UI):
+# Sends the exact Helm payload shape the IDP form produces (including per-row cluster
+# connector resolution), opens a pull request, waits for approval, merges, and runs a plan.
+inputSet:
+  name: Example project request podinfo-api (Helm)
+  identifier: example_project_request_helm
+  orgIdentifier: harness_platform_accelerator
+  projectIdentifier: idp_orchestrator
+  description: Full Helm request test for podinfo_api in example_org/example_project. Exercises connector and per-row cluster resolution, PR creation, approval, merge, and IaCM plan without IDP.
+  tags:
+    purpose: service_request_test
+  pipeline:
+    identifier: Service_Request
+    variables:
+      - name: request_action
+        type: String
+        value: request
+      - name: tofu_action
+        type: String
+        value: plan
+      - name: allow_update
+        type: String
+        value: "false"
+      - name: organization_identifier
+        type: String
+        value: example_org
+      - name: project_identifier
+        type: String
+        value: example_project
+      - name: service_type
+        type: String
+        value: helm
+      - name: service_identifier
+        type: String
+        value: podinfo_api
+      - name: service_name
+        type: String
+        value: podinfo-api
+      - name: service_owner
+        type: String
+        value: group:account/developers
+      - name: service_description
+        type: String
+        value: Podinfo Helm service in the dev environment
+      - name: service_config
+        type: String
+        value: '{"chart":{"connector":{"identifier":"podinfo_helm_repo","org":"example_org","project":"example_project"},"name":"podinfo","base_path":"","version":"6.17.0"},"values":{"connector":{"identifier":"generic","org":"","project":""},"repository":"pod-values","path":"deploy/helm/values.yaml"}}'
+      - name: service_infrastructure
+        type: String
+        value: '{"environments":[{"environment":"dev","cluster_connector":"shared_k8s_cluster","namespace":"default"}]}'
