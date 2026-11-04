@@ -51,4 +51,4 @@ inputSet:
         value: '{"environments":[{"environment":"dev","cluster_connector":"shared_k8s_cluster","namespace":"default"}]}'
       - name: pipeline_template
         type: String
-        value: service_request_helm_deploy
+        value: service_request_native_helm_deploy

@@ -124,7 +124,7 @@ spec:
             - helm
           enumNames:
             - Google Cloud Run
-            - Kubernetes Helm chart
+            - Helm Deployment
           default: cloudrun
           description: Select how this application will be deployed. Source and target fields change with this choice.
         deploy_pipeline_template:

@@ -12,7 +12,7 @@ yaml:
     name: ${jsonencode(name)}
     identifier: ${identifier}
     environmentRef: ${environment}
-    deploymentType: Kubernetes
+    deploymentType: NativeHelm
     type: KubernetesDirect
     spec:
       connectorRef: ${jsonencode(config.connector_ref)}

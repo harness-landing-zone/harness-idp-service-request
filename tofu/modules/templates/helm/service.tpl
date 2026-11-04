@@ -1,6 +1,4 @@
-# Service config for a Helm chart deployed with the Harness Kubernetes
-# deployment type: Harness manages the rollout and versioned rollback, and
-# canary or blue-green stay available. Same file format as every other type.
+# Service config for Native Helm: Helm manages install, upgrade and rollback.
 # Inputs: identifier, service, config (the type's own values from the request):
 #   chart.connector_ref, chart.name, chart.version   (required) Helm repo
 #   chart.connector_type                              (optional) OciHelmRepo selects an OCI
@@ -22,7 +20,7 @@ yaml:
     name: ${jsonencode(service.name)}
     identifier: ${identifier}
     serviceDefinition:
-      type: Kubernetes
+      type: NativeHelm
       spec:
 %{ if length(try(config.variables, {})) > 0 ~}
         variables:
@@ -56,8 +54,6 @@ yaml:
                 chartName: ${jsonencode(config.chart.name)}
                 chartVersion: ${jsonencode(config.chart.version)}
                 helmVersion: V3
-                skipResourceVersioning: false
-                enableDeclarativeRollback: false
           - manifest:
               identifier: values
               type: Values

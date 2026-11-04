@@ -3,7 +3,7 @@
 
 A self-service way for a developer to ask for a new **Harness CD Service**, the **Infrastructure Definitions** it deploys to, and an optional **deployment pipeline** from a form in the Harness Internal Developer Portal (IDP). The request becomes plain YAML files in a pull request. After a reviewer approves, the files are merged and OpenTofu makes Harness match them.
 
-Two service types are included today: **Google Cloud Run** and **Kubernetes Helm chart**. Service and infrastructure rendering use two templates per type. Deployment pipeline inputs live in one shared template.
+Two service types are included today: **Google Cloud Run** and **Native Helm deployment**. Service and infrastructure rendering use two templates per type. Deployment pipeline inputs live in one shared template.
 
 ## Contents
 
@@ -85,7 +85,8 @@ The workspace never sees the request. It only reconciles what main records, so t
 │   ├── inputsets/                      Helm and Cloud Run end-to-end request tests
 │   └── templates/
 │       ├── configure-workspace.yaml    Account-level stage template that creates the IaCM workspace
-│       ├── service-request-helm-deploy.yaml       Account Pipeline Template: Kubernetes rolling deployment
+│       ├── service-request-native-helm-deploy.yaml Account Pipeline Template: Native Helm deployment
+│       ├── service-request-helm-deploy.yaml       Legacy Kubernetes template for existing consumers
 │       └── service-request-cloudrun-deploy.yaml   Account Pipeline Template: Cloud Run deployment
 ├── tofu/                               OpenTofu root the IaCM workspace runs
 │   ├── main.tf, variables.tf, ...
@@ -206,10 +207,20 @@ The bundled account templates define these runtime inputs:
 
 | Template | Bound by the request | Chosen when deploying |
 | --- | --- | --- |
-| `service_request_helm_deploy` | `service_identifier` | `environment_identifier`, reviewed `git_commit` for the values file |
+| `service_request_native_helm_deploy` | `service_identifier` | `environment_identifier`, reviewed `git_commit` for the values file |
 | `service_request_cloudrun_deploy` | `service_identifier` | `environment_identifier`, `runner_connector_ref`, `runner_namespace`, Deploy stage `serviceInputs` |
 
-Creating a pipeline does not run it or deploy a workload. A matching tag alone does not guarantee compatible inputs: update the shared `pipeline.tpl` before selecting another template contract. A new stable version does not automatically update the versions already pinned in saved configs. The Helm example uses `K8sRollingDeploy`; it is not a blue-green template.
+Creating a pipeline does not run it or deploy a workload. A matching tag alone does not guarantee compatible inputs: update the shared `pipeline.tpl` before selecting another template contract. A new stable version does not automatically update the versions already pinned in saved configs. The Native Helm example uses `HelmDeploy` and `HelmRollback`; it is a rolling deployment template.
+
+### Native Helm deployment
+
+The workflow offers **Google Cloud Run** and **Helm Deployment**. New `helm` requests use `NativeHelm` for both the Service and infrastructure deployment type. The connection type stays `KubernetesDirect`. Chart repositories, values files and the runtime Git commit input are unchanged.
+
+Register `service_request_native_helm_deploy` at account scope with version `v1`, mark it stable, and select **Service Request Native Helm Deploy** for new Helm requests. Native Helm uses Helm install/upgrade and Helm rollback, including chart hooks; the previous Kubernetes approach rendered charts and let Harness apply and track the resources.
+
+The legacy `pipelines/templates/service-request-helm-deploy.yaml` is retained for existing Kubernetes consumers. Do not select or register it for new Native Helm requests. Existing saved configs and pinned pipeline references are not migrated automatically. Use a fresh Service identifier and a separate, existing test namespace: changing the deployment type does not transfer existing Kubernetes resources into a Helm release.
+
+A separate Kubernetes deployment option is still being tested in the private examples repository and is not included here. These changes are repository files only; updating a live Harness workflow or registering templates is a separate action.
 
 ## Prerequisites
 
@@ -261,7 +272,7 @@ A full `tofu plan` then shows the Services, Infrastructure Definitions and any r
 
 **2. Register the stage template** `pipelines/templates/configure-workspace.yaml` at account level as `Configure_Service_Request_Workspace` `v1`.
 
-**3. Register deployment templates.** For pipeline requests, register `pipelines/templates/service-request-helm-deploy.yaml` and `service-request-cloudrun-deploy.yaml` as account-level Pipeline Templates at `v1`, then mark those versions stable. Review their connector references first. Helm uses Kubernetes rolling deployment; Cloud Run uses a Kubernetes runner and the `account.DockerHub` connector for its plugin images.
+**3. Register deployment templates.** For pipeline requests, register `pipelines/templates/service-request-native-helm-deploy.yaml` and `service-request-cloudrun-deploy.yaml` as account-level Pipeline Templates at `v1`, then mark those versions stable. Review their connector references first. Helm uses Native Helm deployment; Cloud Run uses a Kubernetes runner and the `account.DockerHub` connector for its plugin images.
 
 **4. Register reconciliation.** Register `pipelines/project-service-reconcile.yaml` in `platform_management` as `Project_Service_Reconcile`.
 
@@ -323,7 +334,7 @@ tofu init
 tofu test
 ```
 
-The five tests cover both deployment template inputs, preservation when pipeline selection is omitted, invalid scope/version rejection and the root's Service/infrastructure/pipeline handoff. Harness and local providers are mocked; no credentials, live changes or file writes are required. Provider installation still requires `tofu init`.
+The seven tests cover both deployment template inputs, Native Helm Service and infrastructure types, Helm deploy/rollback steps, preservation when pipeline selection is omitted, invalid scope/version rejection and the root's Service/infrastructure/pipeline handoff. Harness and local providers are mocked; no credentials, live changes or file writes are required. Provider installation still requires `tofu init`.
 
 For a real plan, copy the sanitized values example and edit it for your installation:
 
@@ -341,7 +352,7 @@ Before testing IDP, import the two input sets into `harness_platform_accelerator
 
 | Input set | Service | Environment(s) | Selected account template |
 | --- | --- | --- | --- |
-| `pipelines/inputsets/example-project-request-helm.yaml` | `podinfo_api` | `dev` | `service_request_helm_deploy` |
+| `pipelines/inputsets/example-project-request-helm.yaml` | `podinfo_api` | `dev` | `service_request_native_helm_deploy` |
 | `pipelines/inputsets/example-project-request-payments-api.yaml` | `payments_api` | `dev`, `staging` | `service_request_cloudrun_deploy` |
 
 Replace the example consumer project, connectors and source repository settings, register the account templates, and make the reviewed module changes available on your config repository's main branch. Update the request pipeline before importing its input sets so it exposes `pipeline_template`.

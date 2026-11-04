@@ -25,7 +25,7 @@ services = {
         dev = { connector_ref = "shared_k8s_cluster", namespace = "default" }
       }
       pipeline = {
-        template_ref  = "account.service_request_helm_deploy"
+        template_ref  = "account.service_request_native_helm_deploy"
         version_label = "v1"
       }
     }

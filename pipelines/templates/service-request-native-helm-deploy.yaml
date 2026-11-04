@@ -1,0 +1,72 @@
+# Register at account scope as service_request_native_helm_deploy v1 and mark this version stable.
+template:
+  name: Service Request Native Helm Deploy
+  identifier: service_request_native_helm_deploy
+  versionLabel: v1
+  type: Pipeline
+  tags:
+    idp_enabled: "true"
+    purpose: service_request
+    service_type: helm
+  spec:
+    variables:
+      - name: service_identifier
+        type: String
+        value: <+input>
+      - name: environment_identifier
+        type: String
+        value: <+input>
+      - name: git_commit
+        type: String
+        description: Reviewed full Git commit containing the Helm values file.
+        value: <+input>
+    stages:
+      - stage:
+          name: Deploy Helm
+          identifier: Deploy
+          type: Deployment
+          spec:
+            deploymentType: NativeHelm
+            service:
+              serviceRef: <+pipeline.variables.service_identifier>
+              serviceInputs:
+                serviceDefinition:
+                  type: NativeHelm
+                  spec:
+                    manifests:
+                      - manifest:
+                          identifier: values
+                          type: Values
+                          spec:
+                            store:
+                              type: Github
+                              spec:
+                                commitId: <+pipeline.variables.git_commit>
+            environment:
+              environmentRef: <+pipeline.variables.environment_identifier>
+              deployToAll: false
+              infrastructureDefinitions:
+                - identifier: <+pipeline.variables.service_identifier>
+            execution:
+              steps:
+                - step:
+                    identifier: Rollout
+                    name: Rollout
+                    type: HelmDeploy
+                    timeout: 10m
+                    spec:
+                      skipSteadyStateCheck: false
+                      useUpgradeInstall: true
+              rollbackSteps:
+                - step:
+                    identifier: Rollback
+                    name: Rollback
+                    type: HelmRollback
+                    timeout: 10m
+                    spec:
+                      skipSteadyStateCheck: false
+          failureStrategies:
+            - onFailure:
+                errors: [AllErrors]
+                action:
+                  type: StageRollback

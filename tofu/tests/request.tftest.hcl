@@ -20,7 +20,7 @@ run "request_creates_all_three_configs" {
           }
           infrastructure = { dev = { connector_ref = "test_cluster", namespace = "default" } }
           pipeline = {
-            template_ref  = "account.service_request_helm_deploy"
+            template_ref  = "account.service_request_native_helm_deploy"
             version_label = "v1"
           }
         }

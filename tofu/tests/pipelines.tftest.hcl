@@ -12,7 +12,7 @@ variables {
       helm_test = {
         name = "Helm test"
         pipeline = {
-          template_ref  = "account.service_request_helm_deploy"
+          template_ref  = "account.service_request_native_helm_deploy"
           version_label = "v1"
         }
       }
@@ -45,7 +45,7 @@ run "render_helm_and_cloudrun" {
   }
   assert {
     condition = (
-      yamldecode(local_file.rendered["helm_test_deploy"].content).yaml.pipeline.template.templateRef == "account.service_request_helm_deploy" &&
+      yamldecode(local_file.rendered["helm_test_deploy"].content).yaml.pipeline.template.templateRef == "account.service_request_native_helm_deploy" &&
       yamldecode(local_file.rendered["helm_test_deploy"].content).yaml.pipeline.template.versionLabel == "v1" &&
       { for v in yamldecode(local_file.rendered["helm_test_deploy"].content).yaml.pipeline.template.templateInputs.variables : v.name => v.value } == {
         service_identifier     = "helm_test"
