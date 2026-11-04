@@ -1,7 +1,7 @@
 ---
 # Troubleshooting input set (Layer 2 - Orchestrator without IDP UI):
 # Sends the exact Helm payload shape the IDP form produces (including per-row cluster
-# connector resolution), opens a pull request, waits for approval, merges, and runs a plan.
+# connector resolution), opens a pull request, waits for approval, merges, and plans the Service, infrastructure and deployment pipeline.
 inputSet:
   name: Example project request podinfo-api (Helm)
   identifier: example_project_request_helm
@@ -49,3 +49,6 @@ inputSet:
       - name: service_infrastructure
         type: String
         value: '{"environments":[{"environment":"dev","cluster_connector":"shared_k8s_cluster","namespace":"default"}]}'
+      - name: pipeline_template
+        type: String
+        value: service_request_helm_deploy

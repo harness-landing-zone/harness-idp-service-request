@@ -1,0 +1,100 @@
+# Register at account scope as service_request_cloudrun_deploy v1 and mark this version stable.
+template:
+  name: Service Request Cloud Run Deploy
+  identifier: service_request_cloudrun_deploy
+  versionLabel: v1
+  type: Pipeline
+  tags:
+    idp_enabled: 'true'
+    purpose: service_request
+    service_type: cloudrun
+  spec:
+    variables:
+    - name: service_identifier
+      type: String
+      value: <+input>
+    - name: environment_identifier
+      type: String
+      value: <+input>
+    - name: runner_connector_ref
+      type: String
+      value: <+input>
+    - name: runner_namespace
+      type: String
+      value: <+input>
+    stages:
+    - stage:
+        type: Deployment
+        spec:
+          deploymentType: GoogleCloudRun
+          service:
+            serviceRef: <+pipeline.variables.service_identifier>
+            serviceInputs: <+input>
+          environment:
+            environmentRef: <+pipeline.variables.environment_identifier>
+            deployToAll: false
+            infrastructureDefinitions:
+            - identifier: <+pipeline.variables.service_identifier>
+          execution:
+            steps:
+            - stepGroup:
+                identifier: Deploy_Cloud_Run
+                name: Deploy Cloud Run
+                stepGroupInfra:
+                  type: KubernetesDirect
+                  spec:
+                    connectorRef: <+pipeline.variables.runner_connector_ref>
+                    namespace: <+pipeline.variables.runner_namespace>
+                steps:
+                - step:
+                    identifier: Download_Manifest
+                    name: Download Manifest
+                    type: DownloadManifests
+                    timeout: 10m
+                    spec: {}
+                - step:
+                    identifier: Prepare_Rollback
+                    name: Prepare Rollback
+                    type: GoogleCloudRunPrepareRollbackData
+                    timeout: 10m
+                    spec:
+                      connectorRef: account.DockerHub
+                      image: harness/google-cloud-run-plugin:1.0.4-linux-amd64
+                      imagePullPolicy: IfNotPresent
+                - step:
+                    identifier: Deploy
+                    name: Deploy Revision
+                    type: GoogleCloudRunDeploy
+                    timeout: 20m
+                    spec:
+                      connectorRef: account.DockerHub
+                      image: harness/google-cloud-run-plugin:1.0.4-linux-amd64
+                      imagePullPolicy: IfNotPresent
+                      skipTrafficShift: false
+            rollbackSteps:
+            - stepGroup:
+                identifier: Rollback_Cloud_Run
+                name: Rollback Cloud Run
+                stepGroupInfra:
+                  type: KubernetesDirect
+                  spec:
+                    connectorRef: <+pipeline.variables.runner_connector_ref>
+                    namespace: <+pipeline.variables.runner_namespace>
+                steps:
+                - step:
+                    identifier: Rollback
+                    name: Restore Previous Revision
+                    type: GoogleCloudRunRollback
+                    timeout: 20m
+                    spec:
+                      connectorRef: account.DockerHub
+                      image: harness/google-cloud-run-plugin:1.0.4-linux-amd64
+                      imagePullPolicy: IfNotPresent
+        failureStrategies:
+        - onFailure:
+            errors:
+            - AllErrors
+            action:
+              type: StageRollback
+        name: Deploy Cloud Run
+        identifier: Deploy

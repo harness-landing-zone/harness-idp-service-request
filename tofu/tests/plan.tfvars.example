@@ -1,0 +1,33 @@
+# Copy to plan.local.tfvars, replace your project/connector settings, and pass -var-file.
+# The .tfvars copy is ignored by Git. Credentials belong in environment variables.
+organization_identifier = "example_org"
+project_identifier      = "example_project"
+write_files             = false
+
+services = {
+  helm = {
+    helm_pipeline_test = {
+      name  = "Helm pipeline test"
+      owner = "group:account/developers"
+      config = {
+        chart = {
+          connector_ref = "podinfo_helm_repo"
+          name          = "podinfo"
+          version       = "6.17.0"
+        }
+        values = {
+          connector_ref = "account.generic"
+          repository    = "pod-values"
+          path          = "deploy/helm/values.yaml"
+        }
+      }
+      infrastructure = {
+        dev = { connector_ref = "shared_k8s_cluster", namespace = "default" }
+      }
+      pipeline = {
+        template_ref  = "account.service_request_helm_deploy"
+        version_label = "v1"
+      }
+    }
+  }
+}

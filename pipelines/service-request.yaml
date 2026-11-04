@@ -2,9 +2,9 @@
 # Service Request (idp_orchestrator)
 # One linear run per request:
 #   1. Serialize          one run at a time per requested Service
-#   2. Publish Request    scope and check the chosen connectors, render the Service and
-#                         infrastructure files, push them to a request branch, open a
-#                         pull request. Creates nothing.
+#   2. Publish Request    resolve connectors and the optional account template, render the Service and
+#                         infrastructure and optional pipeline files, push a request branch
+#                         and open a pull request. Creates no Harness resources.
 #   3. Review Request     Harness approval. The run waits here, without using a build
 #                         machine, while the pull request is reviewed.
 #   4. Merge Request      after approval, merge the pull request (or accept that a
@@ -18,7 +18,7 @@ pipeline:
   identifier: Service_Request
   projectIdentifier: idp_orchestrator
   orgIdentifier: harness_platform_accelerator
-  description: Entry point for the IDP service request form. Renders the Service and its infrastructure as config files, opens a pull request, waits for approval, merges the pull request and then chains Project Service Reconcile in platform_management. With request_action reconcile it only reconciles a project.
+  description: Entry point for the IDP service request form. Renders the Service, its infrastructure and optional deployment pipeline as config files, opens a pull request, waits for approval, merges the pull request and then chains Project Service Reconcile in platform_management. With request_action reconcile it only reconciles a project.
   tags:
     idp_access: service_requests
     purpose: service_request
@@ -76,9 +76,9 @@ pipeline:
                         branch: main
               - step:
                   type: Run
-                  name: Resolve Connectors
+                  name: Resolve Connectors and Template
                   identifier: Resolve_Connectors
-                  description: Turns each connector the form picked into a reference scoped to where the connector lives, and checks in Harness that it exists and has an expected type.
+                  description: Resolves and validates connector references, and pins the selected account Pipeline Template to its stable version when requested.
                   timeout: 10m
                   spec:
                     connectorRef: account.DockerHub
@@ -213,11 +213,28 @@ pipeline:
 
                       echo "Config: $SERVICE_CONFIG"
                       echo "Infrastructure: $SERVICE_INFRASTRUCTURE"
-                      export SERVICE_CONFIG SERVICE_INFRASTRUCTURE
+                      # An empty selection leaves existing pipeline configs unchanged.
+                      SERVICE_PIPELINE='{}'
+                      if [ -n "$PIPELINE_TEMPLATE" ] && [ "$PIPELINE_TEMPLATE" != "null" ]; then
+                        TEMPLATE_ID=${PIPELINE_TEMPLATE#account.}
+                        printf '%s' "$TEMPLATE_ID" | jq -Re 'test("^[a-zA-Z_][a-zA-Z0-9_$]{0,127}$")' >/dev/null || {
+                          echo "Select an account Pipeline Template identifier." >&2; exit 1;
+                        }
+                        TEMPLATE=$(curl -fsS --connect-timeout 10 --max-time 60 --get \
+                          "$HARNESS_ENDPOINT/template/api/templates/$TEMPLATE_ID" \
+                          -H "x-api-key: $HARNESS_API_KEY" \
+                          --data-urlencode "accountIdentifier=$ACCOUNT" --data-urlencode "label=stable")
+                        SERVICE_PIPELINE=$(printf '%s' "$TEMPLATE" | jq -ce --arg type "$SERVICE_TYPE" --arg id "$TEMPLATE_ID" '
+                          .data | if .identifier == $id and .templateEntityType == "Pipeline" and .stableTemplate == true
+                            and .templateScope == "account" and .tags.service_type == $type
+                            and (.versionLabel | type == "string" and length > 0)
+                          then {template_ref: ("account." + .identifier), version_label: .versionLabel}
+                          else error("Select a stable account Pipeline Template tagged for the requested service_type") end')
+                      fi
+                      export SERVICE_CONFIG SERVICE_INFRASTRUCTURE SERVICE_PIPELINE
                     envVariables:
                       HARNESS_ENDPOINT: https://app.harness.io/gateway
-                      # Reads connectors only. Its service account needs connector View in
-                      # the consumer projects, their organizations and the account.
+                      # Needs connector View in consumer scopes and template View at account scope.
                       HARNESS_API_KEY: <+secrets.getValue("account.idp_service_requests_token")>
                       ACCOUNT: <+account.identifier>
                       ORGANIZATION: <+pipeline.variables.organization_identifier>
@@ -225,6 +242,7 @@ pipeline:
                       SERVICE_TYPE: <+pipeline.variables.service_type>
                       SERVICE_CONFIG: <+pipeline.variables.service_config>
                       SERVICE_INFRASTRUCTURE: <+pipeline.variables.service_infrastructure>
+                      PIPELINE_TEMPLATE: <+pipeline.variables.pipeline_template>
                     outputVariables:
                       - name: SERVICE_CONFIG
                         type: String
@@ -232,6 +250,9 @@ pipeline:
                       - name: SERVICE_INFRASTRUCTURE
                         type: String
                         value: SERVICE_INFRASTRUCTURE
+                      - name: SERVICE_PIPELINE
+                        type: String
+                        value: SERVICE_PIPELINE
               - step:
                   type: Run
                   name: Render Request
@@ -274,7 +295,7 @@ pipeline:
                           | [$form.environments[] | {key: .environment, value: (($form | del(.environments)) + (if .cluster_connector then {connector_ref: .cluster_connector} else {} end) + (del(.environment, .cluster_connector) | with_entries(.key |= ltrimstr("gcp_"))))}]
                           | from_entries
                         else . end')
-                      TF_VAR_services=$(jq -cn --arg type "$SERVICE_TYPE" --arg id "$SERVICE_IDENTIFIER" --arg name "$SERVICE_NAME" --arg owner "$SERVICE_OWNER" --arg description "$SERVICE_DESCRIPTION" --argjson config "$SERVICE_CONFIG" --argjson infrastructure "$SERVICE_INFRASTRUCTURE" '{($type): {($id): ({name: $name, owner: $owner, config: $config} + (if $description == "" then {} else {description: $description} end) + (if ($infrastructure | length) == 0 then {} else {infrastructure: $infrastructure} end))}}')
+                      TF_VAR_services=$(jq -cn --arg type "$SERVICE_TYPE" --arg id "$SERVICE_IDENTIFIER" --arg name "$SERVICE_NAME" --arg owner "$SERVICE_OWNER" --arg description "$SERVICE_DESCRIPTION" --argjson config "$SERVICE_CONFIG" --argjson infrastructure "$SERVICE_INFRASTRUCTURE" --argjson pipeline "$SERVICE_PIPELINE" '{($type): {($id): ({name: $name, owner: $owner, config: $config} + (if $description == "" then {} else {description: $description} end) + (if ($infrastructure | length) == 0 then {} else {infrastructure: $infrastructure} end) + (if ($pipeline | length) == 0 then {} else {pipeline: $pipeline} end))}}')
                       export TF_VAR_services
                       # END request translation
                       echo "Request: $TF_VAR_services"
@@ -298,7 +319,8 @@ pipeline:
                       tofu init -input=false -no-color
                       tofu apply -auto-approve -input=false -no-color -state=/harness/render/render.tfstate \
                         -target=module.harness_services.local_file.rendered \
-                        -target=module.harness_infrastructures.local_file.rendered
+                        -target=module.harness_infrastructures.local_file.rendered \
+                        -target=module.harness_pipelines.local_file.rendered
 
                       CHANGED=false
                       if [ -n "$(git -c safe.directory=/harness/publish -C /harness/publish status --porcelain -- tofu/configs)" ]; then CHANGED=true; fi
@@ -317,6 +339,7 @@ pipeline:
                       SERVICE_DESCRIPTION: <+pipeline.variables.service_description>
                       SERVICE_CONFIG: <+pipeline.stages.Publish_Request.spec.execution.steps.Resolve_Connectors.output.outputVariables.SERVICE_CONFIG>
                       SERVICE_INFRASTRUCTURE: <+pipeline.stages.Publish_Request.spec.execution.steps.Resolve_Connectors.output.outputVariables.SERVICE_INFRASTRUCTURE>
+                      SERVICE_PIPELINE: <+pipeline.stages.Publish_Request.spec.execution.steps.Resolve_Connectors.output.outputVariables.SERVICE_PIPELINE>
                       ALLOW_UPDATE: <+pipeline.variables.allow_update>
                     outputVariables:
                       - name: CHANGED
@@ -614,4 +637,9 @@ pipeline:
       required: false
       value: <+input>
       description: 'Where the Service deploys, per environment, as one JSON object, for example {"dev":{"connector_ref":"gcpproject","project":"my-gcp-project","region":"europe-west2"}}.'
+    - name: pipeline_template
+      type: String
+      required: false
+      value: <+input>
+      description: Optional account Pipeline Template identifier. Empty skips pipeline generation. Must match the shared pipeline.tpl inputs; its current stable version is pinned in the config.
   fixedInputsOnRerun: true

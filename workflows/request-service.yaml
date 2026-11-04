@@ -38,6 +38,8 @@ spec:
         - organization_identifier
         - project_identifier
         - service_type
+        - deploy_pipeline_template
+        - pipeline_template
         - service_identifier
         - service_name
         - service_description
@@ -125,6 +127,11 @@ spec:
             - Kubernetes Helm chart
           default: cloudrun
           description: Select how this application will be deployed. Source and target fields change with this choice.
+        deploy_pipeline_template:
+          title: Create a deployment pipeline
+          type: boolean
+          default: false
+          description: Select an approved deployment Pipeline Template for this service type. Workload deployment is a separate step.
       dependencies:
         service_type:
           allOf:
@@ -497,6 +504,46 @@ spec:
                   - values_repository
                   - values_path
                   - kubernetes_environments
+        deploy_pipeline_template:
+          allOf:
+            - if:
+                required:
+                  - deploy_pipeline_template
+                properties:
+                  deploy_pipeline_template:
+                    const: true
+              then:
+                properties:
+                  pipeline_template:
+                    title: Account Pipeline Template
+                    type: string
+                    minLength: 1
+                    description: Select an approved account-level Pipeline Template with a stable version for the selected service type.
+                    ui:field: HarnessEntitySelector
+                    ui:options:
+                      path: /template/api/templates/list-metadata
+                      method: POST
+                      params:
+                        accountIdentifier: YOUR_ACCOUNT_ID
+                        templateListType: Stable
+                        page: "0"
+                        size: "100"
+                      body:
+                        filterType: Template
+                        templateEntityTypes:
+                          - Pipeline
+                        tags:
+                          service_type: "{{ parameters.service_type }}"
+                        listingScope:
+                          accountIdentifier: YOUR_ACCOUNT_ID
+                      arraySelector: data.content
+                      valueSelector: identifier
+                      labelSelector: name
+                      title: Pipeline Template
+                      placeholder: Select an approved template
+                      allowArbitraryValues: false
+                required:
+                  - pipeline_template
   steps:
     - id: trigger
       name: Request the Service
@@ -506,6 +553,7 @@ spec:
         inputset:
           pipeline.variables.request_action: request
           pipeline.variables.tofu_action: apply
+          pipeline.variables.pipeline_template: ${{ parameters.pipeline_template if parameters.deploy_pipeline_template else '' }}
           pipeline.variables.allow_update: "false"
           pipeline.variables.organization_identifier: ${{ parameters.organization_identifier }}
           pipeline.variables.project_identifier: ${{ parameters.project_identifier }}

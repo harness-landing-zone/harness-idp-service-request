@@ -22,3 +22,13 @@ output "infrastructure_files" {
   description = "Infrastructure files this run declares. New ones still need to be committed and pushed."
   value       = module.harness_infrastructures.infrastructure_files
 }
+
+output "pipelines" {
+  description = "Project pipelines managed from saved configuration files."
+  value       = module.harness_pipelines.pipelines
+}
+
+output "pipeline_files" {
+  description = "Pipeline files this run declares. New ones still need to be committed and pushed."
+  value       = module.harness_pipelines.pipeline_files
+}

@@ -1,0 +1,17 @@
+name: Existing deployment
+yaml:
+  pipeline:
+    template:
+      templateRef: account.service_request_helm_deploy
+      versionLabel: v1
+      templateInputs:
+        variables:
+          - name: service_identifier
+            type: String
+            value: existing
+          - name: environment_identifier
+            type: String
+            value: <+input>
+          - name: git_commit
+            type: String
+            value: <+input>

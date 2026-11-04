@@ -7,6 +7,7 @@ locals {
   project_dir         = "${local.configs_dir}/organizations/${coalesce(var.organization_folder, var.organization_identifier)}/projects/${coalesce(var.project_key, var.project_identifier)}"
   services_dir        = "${local.project_dir}/services"
   infrastructures_dir = "${local.project_dir}/infrastructures"
+  pipelines_dir       = "${local.project_dir}/pipelines"
 
   # A Service request may carry where it deploys, per environment:
   #   infrastructure = { dev = { connector_ref = "...", project = "...", region = "..." } }
@@ -37,4 +38,16 @@ module "harness_infrastructures" {
   infrastructures      = local.infrastructure_requests
   write_files          = var.write_files
   verify_environments  = var.verify_environments
+}
+
+module "harness_pipelines" {
+  source = "./modules/harness-pipelines"
+
+  org_id        = var.organization_identifier
+  project_id    = var.project_identifier
+  pipelines_dir = local.pipelines_dir
+
+  services              = var.services
+  write_files           = var.write_files
+  resource_dependencies = [module.harness_services.services, module.harness_infrastructures.infrastructures]
 }

@@ -1,9 +1,9 @@
 # Harness IDP service request
 
 
-A self-service way for a developer to ask for a new **Harness CD Service**, and the **Infrastructure Definitions** it deploys to, from a form in the Harness Internal Developer Portal (IDP). The request becomes plain YAML files in a pull request. After a reviewer approves, the files are merged and OpenTofu makes Harness match them.
+A self-service way for a developer to ask for a new **Harness CD Service**, the **Infrastructure Definitions** it deploys to, and an optional **deployment pipeline** from a form in the Harness Internal Developer Portal (IDP). The request becomes plain YAML files in a pull request. After a reviewer approves, the files are merged and OpenTofu makes Harness match them.
 
-Two service types are included today: **Google Cloud Run** and **Kubernetes Helm chart**. Adding a type means adding two template files, not writing new OpenTofu code.
+Two service types are included today: **Google Cloud Run** and **Kubernetes Helm chart**. Service and infrastructure rendering use two templates per type. Deployment pipeline inputs live in one shared template.
 
 ## Contents
 
@@ -15,6 +15,7 @@ Two service types are included today: **Google Cloud Run** and **Kubernetes Helm
 - [Values you must replace](#values-you-must-replace)
 - [Getting started](#getting-started)
 - [Adding a service type](#adding-a-service-type)
+- [Testing](#testing)
 - [Next steps](#next-steps)
 - [References](#references)
 - [Contributing](#contributing)
@@ -26,13 +27,13 @@ The work is split between two owners.
 | Who | Owns | How |
 | --- | --- | --- |
 | Platform team | The **project baseline**: the Harness project, its environments (for example `dev`, `staging`, `prod`) and its connectors (cloud, Git, cluster) | Out of scope here. Any project bootstrap works. |
-| Developer | A **Service** and one **Infrastructure Definition per environment** for that Service | One IDP form. This repository. |
+| Developer | A **Service**, one **Infrastructure Definition per environment**, and an optional **deployment pipeline** | One IDP form. This repository. |
 
 Design choices:
 
-- **Git is the source of truth.** A request never calls the Harness API directly. It writes one YAML file per Service and one per Service and environment. Harness is then reconciled from those files.
-- **One infrastructure per Service and environment.** The developer does not pick a shared infrastructure; the request creates the Service's own. Deleting a Service's files removes everything it owns.
-- **A service type is a pair of templates.** `cloudrun` and `helm` are folders with a `service.tpl` and an `infrastructure.tpl`. The OpenTofu code does not know the types; it discovers them.
+- **Git is the source of truth.** A request reads connector and template metadata, then writes a Service config, one infrastructure config per environment and an optional pipeline config. Harness is then reconciled from those files.
+- **One infrastructure per Service and environment.** The developer does not pick a shared infrastructure; the request creates the Service's own. To retire a Service and its associated resources, remove their Service, infrastructure and pipeline configs and review the resulting destroy plan.
+- **A service type is a pair of templates.** `cloudrun` and `helm` are folders with a `service.tpl` and an `infrastructure.tpl`. The Service and infrastructure modules discover these types. Pipeline requests use the shared `templates/pipeline.tpl`.
 - **Works without IDP.** The form is one way in. The same files can be added by pull request and applied by the same workspace.
 - **Review before anything exists.** The request opens a pull request and the run waits for an approval. Nothing is created in Harness until the files are merged and the plan is approved.
 - **Two projects, two jobs.** An orchestrator project receives requests and only needs to write to Git. A platform project owns the IaCM workspaces and the token that creates resources. The pull request is the hand-over between them.
@@ -81,9 +82,11 @@ The workspace never sees the request. It only reconciles what main records, so t
 ├── pipelines/
 │   ├── service-request.yaml            Orchestrator project: render, pull request, approval, merge, chain reconcile
 │   ├── project-service-reconcile.yaml  Platform project: workspace, plan, approve, apply. No request.
-│   ├── inputsets/                      Troubleshooting examples for reconcile and standalone requests
+│   ├── inputsets/                      Helm and Cloud Run end-to-end request tests
 │   └── templates/
-│       └── configure-workspace.yaml    Account-level stage template that creates the IaCM workspace
+│       ├── configure-workspace.yaml    Account-level stage template that creates the IaCM workspace
+│       ├── service-request-helm-deploy.yaml       Account Pipeline Template: Kubernetes rolling deployment
+│       └── service-request-cloudrun-deploy.yaml   Account Pipeline Template: Cloud Run deployment
 ├── tofu/                               OpenTofu root the IaCM workspace runs
 │   ├── main.tf, variables.tf, ...
 │   ├── workspace.tfvars                Settings shared by every workspace run
@@ -91,7 +94,11 @@ The workspace never sees the request. It only reconciles what main records, so t
 │   ├── modules/
 │   │   ├── harness-services/           Reads and writes service files, manages harness_platform_service
 │   │   ├── harness-infrastructures/    Same for infrastructure files and harness_platform_infrastructure
-│   │   └── templates/<type>/           service.tpl and infrastructure.tpl per service type
+│   │   ├── harness-pipelines/          Renders saved configs and manages inline project pipelines
+│   │   └── templates/
+│   │       ├── pipeline.tpl            Shared deployment pipeline config
+│   │       └── <type>/                 service.tpl and infrastructure.tpl per service type
+│   ├── tests/                          Mocked plan tests and local plan values example
 │   └── configs/                        The config files: the source of truth (example content)
 └── workspace-bootstrap/                OpenTofu used by the stage template to create the workspace
 ```
@@ -105,7 +112,8 @@ The files Harness is reconciled from, one tree per consumer project:
 ```
 configs/organizations/<org>/projects/<project>/
 ├── services/<type>/<service_identifier>.yaml
-└── infrastructures/<environment>/<service_identifier>.yaml
+├── infrastructures/<environment>/<service_identifier>.yaml
+└── pipelines/<service_identifier>_deploy.yaml
 ```
 
 Each file holds a few fields the module reads (`name`, `tags`, the type) and the Harness YAML under `yaml:`. The files in this repository are example output for a Service called `orders_api`. They are written by the pipeline, and they can also be edited by hand.
@@ -115,7 +123,8 @@ Each file holds a few fields the module reads (`name`, `tags`, the type) and the
 - **`modules/harness-services`** finds every service file for the project, optionally renders new ones from a request, and declares one `harness_platform_service` per file.
 - **`modules/harness-infrastructures`** does the same for infrastructure files and `harness_platform_infrastructure`.
 - **`modules/templates/<type>/`** holds the two templates of a type. The folder name is the type name.
-- **The root** wires both modules to a project folder and passes the request through.
+- **`modules/harness-pipelines`** reads saved pipeline configs, renders optional requests through the shared `modules/templates/pipeline.tpl`, and declares `harness_platform_pipeline`.
+- **The root** wires all three modules to a project folder and passes the request through.
 
 A request is one variable, `services`, grouped by type:
 
@@ -163,7 +172,7 @@ Run it with `request_action = reconcile` to skip straight to the last stage and 
 
 The pull request is opened with an installation token of a GitHub App, made inside the step from the App's private key (a Harness file secret) and thrown away afterwards. No personal token is stored.
 
-The input sets in `pipelines/inputsets/` are optional troubleshooting examples for testing each layer on its own: `example-project-plan.yaml` and `example-project-apply.yaml` test `Project Service Reconcile` directly against files already on `main`, while `example-project-request-payments-api.yaml` and `example-project-request-helm.yaml` test `Service Request` end-to-end (connector resolution, pull request and reconcile plan) without IDP.
+The two input sets in `pipelines/inputsets/` test `Service_Request` in `idp_orchestrator` end-to-end without IDP. They include template selection and stop at a reconcile plan after the request PR is approved and merged. See [Testing](#testing).
 
 The `service_*` pipeline variables are the request contract: `service_config` is the JSON the service template reads, and `service_infrastructure` is either a map keyed by environment or the form's shape, a connector once and/or one per row plus a list of environment rows, which the render step converts to that map. The form sends each connector as `{"connector": {"identifier", "org", "project"}}`; Service Request replaces it with `connector_ref` and `connector_type` before rendering.
 
@@ -185,6 +194,23 @@ Helm uses a repeatable **Environments** list. Each row selects an environment, a
 
 **Permissions.** The dropdowns show what a developer can **view** (`core_connector_view`). Deploying through a connector needs **Access** (`core_connector_access`) for whoever runs the deployment. Grant the two together, for example in one "connector consumer" role with View and Access bound to the same resource group, and never View alone; then what developers see is what they can use. Service Request reads connectors with the same API key IDP triggers it with (`account.idp_service_requests_token`), so that key's service account needs connector View in the consumer projects, their organizations and the account.
 
+### Optional project deployment pipelines
+
+The **Create a deployment pipeline** checkbox defaults to false. When checked, the workflow lists stable account Pipeline Templates filtered by `service_type` and sends `pipeline_template`. The request resolver checks account scope, Pipeline type and the service-type tag, then pins the current stable `versionLabel` in Git. The request token needs account Template View permission.
+
+`service_identifier` remains the public field and pipeline variable. It becomes the `services.<type>.<identifier>` map key. The pipeline module uses that key as its internal `service_id`, names the pipeline `<service_identifier>_deploy`, and binds the account template's `service_identifier` input. There is no new caller-facing `service_id` field.
+
+The shared `tofu/modules/templates/pipeline.tpl` renders the config into the same PR as the Service and infrastructure files. The render step targets local files only. Reconciliation creates an inline Harness project pipeline after its Service and infrastructure. Leaving the checkbox off preserves saved pipelines; deleting a pipeline config explicitly plans removal of that pipeline.
+
+The bundled account templates define these runtime inputs:
+
+| Template | Bound by the request | Chosen when deploying |
+| --- | --- | --- |
+| `service_request_helm_deploy` | `service_identifier` | `environment_identifier`, reviewed `git_commit` for the values file |
+| `service_request_cloudrun_deploy` | `service_identifier` | `environment_identifier`, `runner_connector_ref`, `runner_namespace`, Deploy stage `serviceInputs` |
+
+Creating a pipeline does not run it or deploy a workload. A matching tag alone does not guarantee compatible inputs: update the shared `pipeline.tpl` before selecting another template contract. A new stable version does not automatically update the versions already pinned in saved configs. The Helm example uses `K8sRollingDeploy`; it is not a blue-green template.
+
 ## Prerequisites
 
 - A Harness account with **IDP**, **CD** and **IaCM**.
@@ -193,7 +219,7 @@ Helm uses a repeatable **Environments** list. Each row selects an environment, a
 - A GitHub App installed on your copy of this repository with read and write access to contents and pull requests, and its private key stored as a Harness file secret. The same App can back your Git connector.
 - A Git connector that can read and push to your copy of this repository.
 - A Kubernetes connector for the step that runs the workspace bootstrap, and a container registry connector for the OpenTofu image.
-- A Harness API token, stored as a Harness secret, that can manage Services, Infrastructure Definitions and IaCM workspaces. A second secret, at account scope, holds the token IDP uses to trigger the pipeline; Service Request also uses it to read connectors.
+- A Harness API token, stored as a Harness secret, that can manage Services, Infrastructure Definitions and IaCM workspaces. For pipeline requests, the managing token also needs project Pipeline management and account Template View. A second secret, at account scope, holds the token IDP uses to trigger the pipeline; Service Request uses it to read connectors and account Pipeline Templates.
 - Locally, only for testing: [OpenTofu](https://opentofu.org) 1.9 or newer.
 
 ## Values you must replace
@@ -202,7 +228,7 @@ The YAML files carry example values. Search and replace these before importing a
 
 | Value in the files | What it is |
 | --- | --- |
-| `YOUR_ACCOUNT_ID` | Your Harness account id (in the workflow's URLs) |
+| `YOUR_ACCOUNT_ID` | Your Harness account id in the workflow URLs and account-template picker parameters/body |
 | `harness_platform_accelerator` / `idp_orchestrator` | Organization and project that hold `Service Request` |
 | `harness_platform_accelerator` / `platform_management` | Organization and project that hold `Project Service Reconcile` and the IaCM workspaces |
 | `harness-landing-zone` / `harness-idp-service-request` | GitHub organization and the config repository the pipelines clone, push to and open pull requests in |
@@ -212,9 +238,9 @@ The YAML files carry example values. Search and replace these before importing a
 | `account.github_app_private_key` | File secret holding that App's private key |
 | `account.DockerHub` | Container registry connector |
 | `hubcluster` | Kubernetes connector that runs the workspace bootstrap step |
-| `https://app.harness.io/gateway` | Harness API endpoint Service Request reads connectors from |
+| `https://app.harness.io/gateway` | Harness API endpoint Service Request reads connectors and templates from |
 | `harness_platform_accelerator_platform_deployer_token` | Secret holding the Harness API token |
-| `idp_service_requests_token` | Account-scope secret IDP uses to trigger the pipeline; Service Request reads connectors with it |
+| `idp_service_requests_token` | Account-scope secret IDP uses to trigger the pipeline; Service Request reads connectors and account templates with it |
 | `account.platform_approvers` | User group that approves requests and workspace changes |
 | `example_org` / `example_project`, `gcpproject`, `my-gcp-project-*`, `podinfo_helm_repo`, `shared_k8s_cluster` | Example consumer project, connectors and GCP project ids in the troubleshooting input sets and example config files |
 
@@ -228,37 +254,39 @@ cp request.auto.tfvars.example request.auto.tfvars
 export HARNESS_ACCOUNT_ID=... HARNESS_PLATFORM_API_KEY=...
 export TF_VAR_organization_identifier=example_org TF_VAR_project_identifier=example_project
 tofu init
-tofu apply -target=module.harness_services.local_file.rendered -target=module.harness_infrastructures.local_file.rendered
+tofu apply -target=module.harness_services.local_file.rendered -target=module.harness_infrastructures.local_file.rendered -target=module.harness_pipelines.local_file.rendered
 ```
 
-A full `tofu plan` then shows the Services and Infrastructure Definitions that would be created in the project.
+A full `tofu plan` then shows the Services, Infrastructure Definitions and any requested deployment pipelines for the project. For a plan-only example with a pipeline, use `tofu/tests/plan.tfvars.example` as described below.
 
 **2. Register the stage template** `pipelines/templates/configure-workspace.yaml` at account level as `Configure_Service_Request_Workspace` `v1`.
 
-**3. Reconcile the example files.** Register `pipelines/project-service-reconcile.yaml` in `platform_management`. Optionally import `pipelines/inputsets/example-project-plan.yaml` and `example-project-apply.yaml` to test the workspace and reconcile flow on its own.
+**3. Register deployment templates.** For pipeline requests, register `pipelines/templates/service-request-helm-deploy.yaml` and `service-request-cloudrun-deploy.yaml` as account-level Pipeline Templates at `v1`, then mark those versions stable. Review their connector references first. Helm uses Kubernetes rolling deployment; Cloud Run uses a Kubernetes runner and the `account.DockerHub` connector for its plugin images.
 
-**4. Add the reviewed path.** Register `pipelines/service-request.yaml` in `idp_orchestrator` as `Service_Request`. Optionally import the two `example-project-request-*` input sets to test connector resolution and pull requests without IDP.
+**4. Register reconciliation.** Register `pipelines/project-service-reconcile.yaml` in `platform_management` as `Project_Service_Reconcile`.
 
-**5. Register the workflow** `workflows/request-service.yaml` in IDP and submit a request. The secret it names must hold a token that may execute pipelines in the orchestrator project and view connectors in the consumer projects, their organizations and the account.
+**5. Add the reviewed path.** Register `pipelines/service-request.yaml` in `idp_orchestrator` as `Service_Request`. Optionally import the two `example-project-request-*` input sets to test connector resolution and pull requests without IDP.
+
+**6. Register the workflow** `workflows/request-service.yaml` in IDP and submit a request. The secret it names must hold a token that may execute pipelines in the orchestrator project and view connectors in the consumer projects, their organizations and the account, and view the account Pipeline Templates.
 
 ## Adding a service type
 
 1. Create `tofu/modules/templates/<type>/service.tpl` and `infrastructure.tpl`. Copy an existing pair and change the Harness YAML; the header comment of each template lists the values it reads.
 2. Add the type to the `service_type` list in the form, with a branch for its fields. Give its list of environments its own field name.
 3. Extend the two `| dump` expressions in the form's trigger step so the new type's values are sent.
+4. If the type supports pipeline requests, adapt the shared `modules/templates/pipeline.tpl` to the account template's runtime input contract.
 
 ## Next steps
 
-Planned, roughly in this order. None of it is in the repository yet.
+Optional deployment pipeline creation is included. Further enhancements, roughly in this order:
 
-1. **A deployment pipeline with every Service.** The request also creates a pipeline in the consumer project that deploys the new Service. The pipeline adds no logic of its own: its stage comes from an account-level template chosen by the service type, for example a Cloud Run deploy template for `cloudrun` and a Kubernetes rolling, canary or blue-green template for `helm`. It follows the same pattern as Services and infrastructures: a `pipeline.tpl` per type, one YAML file per pipeline in Git, and a `harness-pipelines` module that declares `harness_platform_pipeline`. Because each Service's infrastructure carries the Service's identifier in every environment, the pipeline only asks for the environment at run time.
-2. **Deploy from IDP.** A second workflow that lists the Services of a project and runs that pipeline, so a developer can request a Service and deploy it without leaving the portal.
-3. **Add an environment to an existing Service**, as its own small request.
-4. **Render and pull request as account-level templates**, so the orchestrator pipeline only references them and other teams can own the render for their request types.
-5. **Config repository as a pipeline value**, so one orchestrator can serve several config repositories.
-6. **Fewer approvals**: skip the plan approval when a plan only adds resources, or outside production projects. Optionally a Jira approval in place of the Harness one.
-7. **Scope each infrastructure to its Service**, environment overrides, and an IDP catalog entry for every Service.
-8. **Short-lived environments** through IDP Environment Blueprints, for previews that should not live in Git.
+1. **Deploy from IDP.** A second workflow that lists the Services of a project and runs that pipeline, so a developer can request a Service and deploy it without leaving the portal.
+2. **Add an environment to an existing Service**, as its own small request.
+3. **Render and pull request as account-level templates**, so the orchestrator pipeline only references them and other teams can own the render for their request types.
+4. **Config repository as a pipeline value**, so one orchestrator can serve several config repositories.
+5. **Fewer approvals**: skip the plan approval when a plan only adds resources, or outside production projects. Optionally a Jira approval in place of the Harness one.
+6. **Scope each infrastructure to its Service**, environment overrides, and an IDP catalog entry for every Service.
+7. **Short-lived environments** through IDP Environment Blueprints, for previews that should not live in Git.
 
 ## References
 
@@ -284,3 +312,42 @@ Community examples for IDP workflows:
 ## Contributing
 
 Issues and pull requests are welcome, including ones that challenge the design. If you try this in your own account, the most useful feedback is where the setup steps were unclear and which values you had to change that are not in the table above.
+
+
+## Testing
+
+Run native OpenTofu plan tests from `tofu/`:
+
+```bash
+tofu init
+tofu test
+```
+
+The five tests cover both deployment template inputs, preservation when pipeline selection is omitted, invalid scope/version rejection and the root's Service/infrastructure/pipeline handoff. Harness and local providers are mocked; no credentials, live changes or file writes are required. Provider installation still requires `tofu init`.
+
+For a real plan, copy the sanitized values example and edit it for your installation:
+
+```bash
+# Run from tofu/.
+cp tests/plan.tfvars.example tests/plan.local.tfvars
+# Edit tests/plan.local.tfvars and supply your credentials through the environment.
+export HARNESS_ACCOUNT_ID=... HARNESS_PLATFORM_API_KEY=...
+tofu plan -var-file=tests/plan.local.tfvars
+```
+
+The existing `.gitignore` excludes `*.tfvars`; this local file is loaded only when explicitly passed. It uses `write_files=false`. Remove any earlier `request.auto.tfvars` test file if you no longer want it loaded automatically. A fresh local state can show existing resources as creates; use the project reconcile pipeline for a plan against its managed IaCM state, and do not apply a fresh local plan over those resources.
+
+Before testing IDP, import the two input sets into `harness_platform_accelerator / idp_orchestrator / Service_Request`:
+
+| Input set | Service | Environment(s) | Selected account template |
+| --- | --- | --- | --- |
+| `pipelines/inputsets/example-project-request-helm.yaml` | `podinfo_api` | `dev` | `service_request_helm_deploy` |
+| `pipelines/inputsets/example-project-request-payments-api.yaml` | `payments_api` | `dev`, `staging` | `service_request_cloudrun_deploy` |
+
+Replace the example consumer project, connectors and source repository settings, register the account templates, and make the reviewed module changes available on your config repository's main branch. Update the request pipeline before importing its input sets so it exposes `pipeline_template`.
+
+Both input sets use `request_action=request`, `tofu_action=plan` and `allow_update=false`. They resolve connectors and the template, generate all three config categories, open a PR, wait for approval, merge and chain the reconcile plan. Plan mode still publishes and merges config changes after approval; workspace setup can also have its own approval and changes. It does not apply the requested Service/infrastructure/pipeline resources or deploy a workload.
+
+Review the PR and plan. After a successful merge, choose a new `service_identifier` for another create test; use `allow_update=true` only when intentionally updating that same test Service. Override `tofu_action` to `apply` for an approved resource-creation test. Once both direct pipeline tests pass, test the requests through IDP.
+
+Repository discovery for the Helm Values repository field remains a separate enhancement pending validation in examples; this release retains its existing text input.

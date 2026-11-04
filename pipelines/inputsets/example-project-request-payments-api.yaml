@@ -1,7 +1,7 @@
 ---
 # Troubleshooting input set (Layer 2 - Orchestrator without IDP UI):
 # Sends the exact Cloud Run payload shape the IDP form produces, resolves connectors,
-# opens a pull request, waits for approval, merges, and runs a reconcile plan.
+# opens a pull request, waits for approval, merges, and plans the Service, infrastructure and deployment pipeline.
 inputSet:
   name: Example project request payments-api (Cloud Run)
   identifier: example_project_request_payments_api
@@ -49,3 +49,6 @@ inputSet:
       - name: service_infrastructure
         type: String
         value: '{"connector":{"identifier":"gcpproject","org":"example_org","project":"example_project"},"environments":[{"environment":"dev","gcp_project":"my-gcp-project-dev","gcp_region":"europe-west2"},{"environment":"staging","gcp_project":"my-gcp-project-staging","gcp_region":"europe-west2"}]}'
+      - name: pipeline_template
+        type: String
+        value: service_request_cloudrun_deploy
